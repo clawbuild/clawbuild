@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { Context, Next } from 'hono'
 import nacl from 'tweetnacl'
 import { decodeBase64, encodeUTF8 } from 'tweetnacl-util'

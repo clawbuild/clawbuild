@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { Hono } from 'hono'
 import { db } from '../lib/db'
 

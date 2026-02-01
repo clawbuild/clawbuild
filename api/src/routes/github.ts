@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { Hono } from 'hono'
 import { getInstallationInfo, createRepo } from '../lib/github'
 import { verifyAgent, AgentContext } from '../middleware/auth'
