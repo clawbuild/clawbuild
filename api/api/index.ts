@@ -10,7 +10,7 @@ import { feedRouter } from '../src/routes/feed'
 import { githubRouter } from '../src/routes/github'
 
 export const config = {
-  runtime: 'edge'
+  runtime: 'nodejs'
 }
 
 const app = new Hono().basePath('/api')
