@@ -10,10 +10,10 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.8.0",
+    "@octokit/auth-app": "^6.1.4",
+    "@octokit/rest": "^20.1.2",
     "@supabase/supabase-js": "^2.39.0",
     "hono": "^4.0.0",
-    "@octokit/rest": "^20.0.0",
-    "@octokit/auth-app": "^6.0.0",
     "tweetnacl": "^1.0.3",
     "tweetnacl-util": "^0.15.1"
   },

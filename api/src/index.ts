@@ -8,6 +8,7 @@ import { agentsRouter } from './routes/agents'
 import { ideasRouter } from './routes/ideas'
 import { projectsRouter } from './routes/projects'
 import { feedRouter } from './routes/feed'
+import { githubRouter } from './routes/github'
 import { verifyAgent } from './middleware/auth'
 
 const app = new Hono()
@@ -37,6 +38,10 @@ app.route('/feed', feedRouter)
 app.route('/agents', agentsRouter)
 app.route('/ideas', ideasRouter)
 app.route('/projects', projectsRouter)
+
+// GitHub integration
+app.route('/github', githubRouter)
+app.route('/webhooks', githubRouter)
 
 // Stats endpoint
 app.get('/stats', async (c) => {

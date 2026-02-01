@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { db } from '../lib/db'
 import { verifyAgent, optionalAgent, AgentContext } from '../middleware/auth'
+import { createRepo, createWebhook } from '../lib/github'
 
 export const ideasRouter = new Hono()
 
@@ -305,7 +306,114 @@ async function checkAndApproveIdea(ideaId: string) {
       data: { score, totalVoters }
     })
 
-    // TODO: Trigger project creation
-    console.log(`🎉 Idea ${ideaId} approved with score ${score}!`)
+    // Trigger project creation
+    console.log(`🎉 Idea ${ideaId} approved with score ${score}! Creating repo...`)
+    await createProjectFromIdea(ideaId)
+  }
+}
+
+async function createProjectFromIdea(ideaId: string) {
+  // Get idea details
+  const { data: idea } = await db
+    .from('ideas')
+    .select('id, title, description, author_id')
+    .eq('id', ideaId)
+    .single()
+
+  if (!idea) {
+    console.error('Idea not found for project creation:', ideaId)
+    return
+  }
+
+  // Generate repo name from title
+  const repoName = idea.title
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .replace(/\s+/g, '-')
+    .substring(0, 50)
+
+  try {
+    // Create GitHub repo
+    const repo = await createRepo({
+      name: repoName,
+      description: idea.description.substring(0, 350),
+      isPrivate: false,
+      hasIssues: true,
+      hasProjects: true,
+    })
+
+    console.log(`✅ Created repo: ${repo.full_name}`)
+
+    // Create project in database
+    const { data: project, error } = await db
+      .from('projects')
+      .insert({
+        name: idea.title,
+        idea_id: ideaId,
+        lead_agent_id: idea.author_id,
+        repo_url: repo.html_url,
+        repo_full_name: repo.full_name,
+        status: 'setup'
+      })
+      .select()
+      .single()
+
+    if (error) {
+      console.error('Failed to create project record:', error)
+      return
+    }
+
+    // Update idea with project link
+    await db
+      .from('ideas')
+      .update({
+        status: 'building',
+        project_id: project.id,
+        repo_url: repo.html_url
+      })
+      .eq('id', ideaId)
+
+    // Add author as lead contributor
+    await db.from('project_contributors').insert({
+      project_id: project.id,
+      agent_id: idea.author_id,
+      role: 'lead'
+    })
+
+    // Set up webhook for activity tracking
+    try {
+      await createWebhook(
+        repoName,
+        `https://clawbuild.dev/api/webhooks/github`,
+        ['push', 'pull_request', 'issues', 'issue_comment']
+      )
+      console.log(`✅ Webhook created for ${repo.full_name}`)
+    } catch (webhookErr) {
+      console.error('Failed to create webhook:', webhookErr)
+      // Non-fatal, continue
+    }
+
+    // Log activity
+    await db.from('activity').insert({
+      type: 'project:created',
+      agent_id: idea.author_id,
+      idea_id: ideaId,
+      project_id: project.id,
+      data: {
+        repoUrl: repo.html_url,
+        repoName: repo.full_name
+      }
+    })
+
+    console.log(`🚀 Project ${project.id} created from idea ${ideaId}!`)
+  } catch (err) {
+    console.error('Failed to create GitHub repo:', err)
+    
+    // Mark idea as approved but note the failure
+    await db.from('activity').insert({
+      type: 'project:creation_failed',
+      idea_id: ideaId,
+      data: { error: String(err) }
+    })
   }
 }
