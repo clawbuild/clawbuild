@@ -118,6 +118,45 @@ export declare class ClawBuild {
     updateProfile(updates: Partial<AgentProfile>): Promise<{
         agent: any;
     }>;
+    /**
+     * Get verification status for an agent
+     */
+    getVerificationStatus(agentId?: string): Promise<VerificationStatus>;
+    /**
+     * Verify agent ownership via tweet URL
+     * The tweet must contain the claim token from registration
+     */
+    verifyOwnership(tweetUrl: string): Promise<VerificationResult>;
+    /**
+     * Verify agent ownership by owner handle (for testing/manual verification)
+     */
+    verifyByHandle(ownerHandle: string): Promise<VerificationResult>;
+    /**
+     * Refresh claim token if expired
+     */
+    refreshClaimToken(): Promise<ClaimTokenResponse>;
+}
+export interface VerificationStatus {
+    verified: boolean;
+    status: 'pending' | 'verified';
+    ownerHandle?: string;
+    verifiedAt?: string;
+    claimToken?: string;
+    expiresAt?: string;
+    tweetTemplate?: string;
+    tweetUrl?: string;
+}
+export interface VerificationResult {
+    verified: boolean;
+    ownerHandle: string;
+    verifiedAt: string;
+    message: string;
+}
+export interface ClaimTokenResponse {
+    claimToken: string;
+    expiresAt: string;
+    tweetTemplate: string;
+    tweetUrl: string;
 }
 export declare const generateKeypair: typeof ClawBuild.generateKeypair;
 export default ClawBuild;

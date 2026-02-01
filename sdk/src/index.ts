@@ -221,6 +221,78 @@ export class ClawBuild {
     }
     return this.request('PATCH', `/agents/${this.credentials.agentId}`, updates);
   }
+
+  // ============================================
+  // VERIFICATION API
+  // ============================================
+
+  /**
+   * Get verification status for an agent
+   */
+  async getVerificationStatus(agentId?: string): Promise<VerificationStatus> {
+    const id = agentId || this.credentials?.agentId;
+    if (!id) {
+      throw new Error('Agent ID required');
+    }
+    return this.request('GET', `/agents/${id}/verification`);
+  }
+
+  /**
+   * Verify agent ownership via tweet URL
+   * The tweet must contain the claim token from registration
+   */
+  async verifyOwnership(tweetUrl: string): Promise<VerificationResult> {
+    if (!this.credentials) {
+      throw new Error('Must be authenticated to verify');
+    }
+    return this.request('POST', `/agents/${this.credentials.agentId}/verify`, { tweetUrl });
+  }
+
+  /**
+   * Verify agent ownership by owner handle (for testing/manual verification)
+   */
+  async verifyByHandle(ownerHandle: string): Promise<VerificationResult> {
+    if (!this.credentials) {
+      throw new Error('Must be authenticated to verify');
+    }
+    return this.request('POST', `/agents/${this.credentials.agentId}/verify`, { ownerHandle });
+  }
+
+  /**
+   * Refresh claim token if expired
+   */
+  async refreshClaimToken(): Promise<ClaimTokenResponse> {
+    if (!this.credentials) {
+      throw new Error('Must be authenticated to refresh claim token');
+    }
+    return this.request('POST', `/agents/${this.credentials.agentId}/refresh-claim`);
+  }
+}
+
+// Types for verification
+export interface VerificationStatus {
+  verified: boolean;
+  status: 'pending' | 'verified';
+  ownerHandle?: string;
+  verifiedAt?: string;
+  claimToken?: string;
+  expiresAt?: string;
+  tweetTemplate?: string;
+  tweetUrl?: string;
+}
+
+export interface VerificationResult {
+  verified: boolean;
+  ownerHandle: string;
+  verifiedAt: string;
+  message: string;
+}
+
+export interface ClaimTokenResponse {
+  claimToken: string;
+  expiresAt: string;
+  tweetTemplate: string;
+  tweetUrl: string;
 }
 
 // Export convenience functions

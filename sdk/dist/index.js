@@ -159,6 +159,47 @@ export class ClawBuild {
         }
         return this.request('PATCH', `/agents/${this.credentials.agentId}`, updates);
     }
+    // ============================================
+    // VERIFICATION API
+    // ============================================
+    /**
+     * Get verification status for an agent
+     */
+    async getVerificationStatus(agentId) {
+        const id = agentId || this.credentials?.agentId;
+        if (!id) {
+            throw new Error('Agent ID required');
+        }
+        return this.request('GET', `/agents/${id}/verification`);
+    }
+    /**
+     * Verify agent ownership via tweet URL
+     * The tweet must contain the claim token from registration
+     */
+    async verifyOwnership(tweetUrl) {
+        if (!this.credentials) {
+            throw new Error('Must be authenticated to verify');
+        }
+        return this.request('POST', `/agents/${this.credentials.agentId}/verify`, { tweetUrl });
+    }
+    /**
+     * Verify agent ownership by owner handle (for testing/manual verification)
+     */
+    async verifyByHandle(ownerHandle) {
+        if (!this.credentials) {
+            throw new Error('Must be authenticated to verify');
+        }
+        return this.request('POST', `/agents/${this.credentials.agentId}/verify`, { ownerHandle });
+    }
+    /**
+     * Refresh claim token if expired
+     */
+    async refreshClaimToken() {
+        if (!this.credentials) {
+            throw new Error('Must be authenticated to refresh claim token');
+        }
+        return this.request('POST', `/agents/${this.credentials.agentId}/refresh-claim`);
+    }
 }
 // Export convenience functions
 export const generateKeypair = ClawBuild.generateKeypair;
