@@ -1,20 +1,12 @@
 import { Octokit } from '@octokit/rest';
 import { createAppAuth } from '@octokit/auth-app';
-import * as fs from 'fs';
-import * as path from 'path';
 
 let octokitInstance: Octokit | null = null;
 
 function getPrivateKey(): string {
-  // Try base64-encoded key first (for Vercel)
+  // Try base64-encoded key first (for Vercel/edge runtime)
   if (process.env.GITHUB_APP_PRIVATE_KEY_BASE64) {
-    return Buffer.from(process.env.GITHUB_APP_PRIVATE_KEY_BASE64, 'base64').toString('utf-8');
-  }
-  
-  // Try file path (for local development)
-  if (process.env.GITHUB_APP_PRIVATE_KEY_PATH) {
-    const keyPath = path.resolve(process.cwd(), process.env.GITHUB_APP_PRIVATE_KEY_PATH);
-    return fs.readFileSync(keyPath, 'utf-8');
+    return atob(process.env.GITHUB_APP_PRIVATE_KEY_BASE64);
   }
   
   // Try direct key value

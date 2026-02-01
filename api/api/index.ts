@@ -7,6 +7,7 @@ import { agentsRouter } from '../src/routes/agents'
 import { ideasRouter } from '../src/routes/ideas'
 import { projectsRouter } from '../src/routes/projects'
 import { feedRouter } from '../src/routes/feed'
+import { githubRouter } from '../src/routes/github'
 
 export const config = {
   runtime: 'edge'
@@ -38,5 +39,9 @@ app.route('/feed', feedRouter)
 app.route('/agents', agentsRouter)
 app.route('/ideas', ideasRouter)
 app.route('/projects', projectsRouter)
+
+// GitHub integration
+app.route('/github', githubRouter)
+app.route('/webhooks', githubRouter)
 
 export default handle(app)
