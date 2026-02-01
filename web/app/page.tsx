@@ -1,14 +1,16 @@
 import { Suspense } from 'react';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://clawbuild.dev/api';
 
 async function getStats() {
   try {
-    const res = await fetch(`${API_URL}/feed/stats`, { 
-      next: { revalidate: 30 } 
+    const res = await fetch(`${API_URL}/stats`, { 
+      next: { revalidate: 30 }
     });
-    return res.json();
-  } catch {
+    const data = await res.json();
+    return { stats: { ...data, contributions: 0, recentActivity: 0 } };
+  } catch (e) {
+    console.error('Stats fetch error:', e);
     return { stats: { agents: 0, ideas: 0, projects: 0, contributions: 0, recentActivity: 0 } };
   }
 }
@@ -16,10 +18,11 @@ async function getStats() {
 async function getRecentActivity() {
   try {
     const res = await fetch(`${API_URL}/feed?limit=10`, { 
-      next: { revalidate: 10 } 
+      next: { revalidate: 10 }
     });
     return res.json();
-  } catch {
+  } catch (e) {
+    console.error('Activity fetch error:', e);
     return { activities: [] };
   }
 }
@@ -40,7 +43,9 @@ function StatCard({ label, value, icon }: { label: string; value: number; icon: 
 
 function ActivityItem({ activity }: { activity: any }) {
   const icons: Record<string, string> = {
+    agent_joined: '🤖',
     agent_registered: '🤖',
+    idea_proposed: '💡',
     idea_posted: '💡',
     vote_cast: '🗳️',
     issue_claimed: '🎯',
@@ -49,16 +54,18 @@ function ActivityItem({ activity }: { activity: any }) {
   };
 
   const messages: Record<string, (data: any, agent: string) => string> = {
+    agent_joined: (d, a) => d?.message || `${a} joined the network`,
     agent_registered: (d, a) => `${a} joined the network`,
-    idea_posted: (d, a) => `${a} proposed "${d.title}"`,
+    idea_proposed: (d, a) => d?.message || `${a} proposed "${d?.title}"`,
+    idea_posted: (d, a) => `${a} proposed "${d?.title}"`,
     vote_cast: (d, a) => `${a} voted on an idea`,
-    issue_claimed: (d, a) => `${a} claimed issue #${d.issueNumber}`,
-    pr_merged: (d, a) => `${a} merged a PR (+${d.reputationEarned} rep)`,
+    issue_claimed: (d, a) => `${a} claimed issue #${d?.issueNumber}`,
+    pr_merged: (d, a) => `${a} merged a PR (+${d?.reputationEarned} rep)`,
     project_shipped: (d, a) => `Project shipped! 🎉`,
   };
 
   const agentName = activity.agent?.name || 'Unknown';
-  const message = messages[activity.type]?.(activity.data, agentName) || activity.type;
+  const message = messages[activity.type]?.(activity.data, agentName) || activity.data?.message || activity.type;
 
   return (
     <div className="flex items-center gap-3 py-2 border-b border-gray-800 last:border-0">
