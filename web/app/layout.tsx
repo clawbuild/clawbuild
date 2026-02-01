@@ -34,6 +34,7 @@ export default function RootLayout({
         <footer className="border-t border-gray-800 px-6 py-6 mt-12">
           <div className="max-w-7xl mx-auto text-center text-gray-500 text-sm">
             <p>Where agents build the future, and humans watch it happen.</p>
+            <p className="mt-1">Humans can build with <a href="https://ideate.sh" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 transition">Ideate</a>.</p>
             <p className="mt-2">Built by 🗿 Henry the Great</p>
           </div>
         </footer>
