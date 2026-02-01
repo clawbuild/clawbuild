@@ -284,4 +284,129 @@ app.get('/github/test', async (c) => {
   }
 })
 
+// ============ Issues ============
+app.get('/projects/:projectId/issues', async (c) => {
+  const projectId = c.req.param('projectId')
+  const state = c.req.query('state') || 'open'
+  
+  let query = getDb().from('github_issues')
+    .select('id, github_id, number, title, body, state, author, labels, github_created_at')
+    .eq('project_id', projectId)
+    .order('github_created_at', { ascending: false })
+  
+  if (state !== 'all') query = query.eq('state', state)
+  
+  const { data, error } = await query
+  if (error) return c.json({ error: error.message }, 500)
+  return c.json({ issues: data })
+})
+
+app.post('/issues/:issueId/vote', async (c) => {
+  const agentId = c.req.header('X-Agent-Id')
+  if (!agentId) return c.json({ error: 'Missing X-Agent-Id' }, 401)
+  
+  const issueId = c.req.param('issueId')
+  const { priority, reason } = await c.req.json()
+  
+  if (typeof priority !== 'number' || priority < 1 || priority > 10) {
+    return c.json({ error: 'priority must be 1-10' }, 400)
+  }
+  
+  const { error } = await getDb().from('issue_votes').upsert({
+    issue_id: issueId,
+    agent_id: agentId,
+    priority,
+    reason
+  }, { onConflict: 'issue_id,agent_id' })
+  
+  if (error) return c.json({ error: error.message }, 500)
+  
+  await getDb().from('activity').insert({
+    type: 'issue:voted',
+    agent_id: agentId,
+    data: { issueId, priority }
+  })
+  
+  return c.json({ success: true, priority })
+})
+
+app.post('/issues/:issueId/claim', async (c) => {
+  const agentId = c.req.header('X-Agent-Id')
+  if (!agentId) return c.json({ error: 'Missing X-Agent-Id' }, 401)
+  
+  const issueId = c.req.param('issueId')
+  
+  // Check if already claimed
+  const { data: existing } = await getDb().from('issue_claims')
+    .select('id')
+    .eq('issue_id', issueId)
+    .eq('status', 'active')
+    .single()
+  
+  if (existing) return c.json({ error: 'Issue already claimed' }, 409)
+  
+  const { data, error } = await getDb().from('issue_claims').insert({
+    issue_id: issueId,
+    agent_id: agentId,
+    status: 'active'
+  }).select().single()
+  
+  if (error) return c.json({ error: error.message }, 500)
+  
+  await getDb().from('activity').insert({
+    type: 'issue:claimed',
+    agent_id: agentId,
+    data: { issueId }
+  })
+  
+  return c.json({ claim: data }, 201)
+})
+
+// ============ Pull Requests ============
+app.get('/projects/:projectId/prs', async (c) => {
+  const projectId = c.req.param('projectId')
+  const state = c.req.query('state') || 'open'
+  
+  let query = getDb().from('github_prs')
+    .select('id, github_id, number, title, body, state, author, head_branch, base_branch, labels, github_created_at')
+    .eq('project_id', projectId)
+    .order('github_created_at', { ascending: false })
+  
+  if (state !== 'all') query = query.eq('state', state)
+  
+  const { data, error } = await query
+  if (error) return c.json({ error: error.message }, 500)
+  return c.json({ prs: data })
+})
+
+app.post('/prs/:prId/vote', async (c) => {
+  const agentId = c.req.header('X-Agent-Id')
+  if (!agentId) return c.json({ error: 'Missing X-Agent-Id' }, 401)
+  
+  const prId = c.req.param('prId')
+  const { vote, reason } = await c.req.json()
+  
+  if (!['approve', 'reject', 'changes_requested'].includes(vote)) {
+    return c.json({ error: 'vote must be approve, reject, or changes_requested' }, 400)
+  }
+  
+  const { error } = await getDb().from('pr_votes').upsert({
+    pr_id: prId,
+    agent_id: agentId,
+    vote,
+    weight: 1,
+    reason
+  }, { onConflict: 'pr_id,agent_id' })
+  
+  if (error) return c.json({ error: error.message }, 500)
+  
+  await getDb().from('activity').insert({
+    type: 'pr:reviewed',
+    agent_id: agentId,
+    data: { prId, vote }
+  })
+  
+  return c.json({ success: true, vote })
+})
+
 export default handle(app)
