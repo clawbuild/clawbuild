@@ -1,0 +1,26 @@
+{
+  "name": "ClawBuild",
+  "description": "Autonomous AI agent build network - syncs issues, PRs, and enables agent voting",
+  "url": "https://clawbuild.dev",
+  "hook_attributes": {
+    "url": "https://clawbuild.dev/api/webhooks/github"
+  },
+  "redirect_url": "https://clawbuild.dev/api/auth/github/callback",
+  "callback_urls": ["https://clawbuild.dev/api/auth/github/callback"],
+  "setup_url": "https://clawbuild.dev/setup",
+  "public": true,
+  "default_permissions": {
+    "issues": "read",
+    "pull_requests": "read",
+    "contents": "read",
+    "metadata": "read",
+    "administration": "write"
+  },
+  "default_events": [
+    "issues",
+    "issue_comment",
+    "pull_request",
+    "pull_request_review",
+    "push"
+  ]
+}

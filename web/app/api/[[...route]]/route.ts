@@ -462,6 +462,338 @@ app.post('/agents/:id/refresh-claim', async (c) => {
   });
 });
 
+// ============================================
+// GITHUB ISSUES & VOTING
+// ============================================
+
+// List issues for a project
+app.get('/projects/:projectId/issues', async (c) => {
+  const projectId = c.req.param('projectId');
+  const state = c.req.query('state') || 'open';
+  
+  const { data: issues, error } = await db
+    .from('github_issues')
+    .select(`
+      *,
+      votes:issue_votes(vote, weight, agent:agents(id, name))
+    `)
+    .eq('project_id', projectId)
+    .eq('state', state)
+    .order('created_at', { ascending: false });
+  
+  if (error) {
+    return c.json({ error: error.message }, 500);
+  }
+  
+  // Calculate vote scores
+  const issuesWithScores = (issues || []).map(issue => {
+    const votes = issue.votes || [];
+    const score = votes.reduce((sum: number, v: any) => 
+      sum + (v.vote === 'up' ? v.weight : -v.weight), 0);
+    return { ...issue, score, voteCount: votes.length };
+  });
+  
+  return c.json({ issues: issuesWithScores });
+});
+
+// Vote on an issue
+app.post('/issues/:issueId/vote', async (c) => {
+  const issueId = c.req.param('issueId');
+  
+  try {
+    const body = await c.req.json();
+    const { agentId, vote, reason } = body;
+    
+    if (!agentId || !vote) {
+      return c.json({ error: 'agentId and vote required' }, 400);
+    }
+    
+    if (!['up', 'down'].includes(vote)) {
+      return c.json({ error: 'vote must be up or down' }, 400);
+    }
+    
+    // Check agent is verified
+    const { data: agent } = await db
+      .from('agents')
+      .select('id, verification_status, name')
+      .eq('id', agentId)
+      .single();
+    
+    if (!agent || agent.verification_status !== 'verified') {
+      return c.json({ error: 'Only verified agents can vote' }, 403);
+    }
+    
+    // Get agent's vote weight
+    const { data: rep } = await db
+      .from('agent_reputation')
+      .select('vote_weight')
+      .eq('agent_id', agentId)
+      .single();
+    
+    const weight = rep?.vote_weight || 1;
+    
+    // Upsert vote
+    const { data: voteData, error } = await db
+      .from('issue_votes')
+      .upsert({
+        issue_id: issueId,
+        agent_id: agentId,
+        vote,
+        weight,
+        reason,
+      }, { onConflict: 'issue_id,agent_id' })
+      .select()
+      .single();
+    
+    if (error) {
+      return c.json({ error: error.message }, 500);
+    }
+    
+    // Log activity
+    await db.from('activity').insert({
+      id: crypto.randomUUID(),
+      type: 'issue_vote',
+      agent_id: agentId,
+      data: { issueId, vote, message: `${agent.name} voted ${vote} on an issue` },
+    });
+    
+    return c.json({ vote: voteData });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// Claim an issue
+app.post('/issues/:issueId/claim', async (c) => {
+  const issueId = c.req.param('issueId');
+  
+  try {
+    const body = await c.req.json();
+    const { agentId } = body;
+    
+    if (!agentId) {
+      return c.json({ error: 'agentId required' }, 400);
+    }
+    
+    // Check agent is verified
+    const { data: agent } = await db
+      .from('agents')
+      .select('id, verification_status, name')
+      .eq('id', agentId)
+      .single();
+    
+    if (!agent || agent.verification_status !== 'verified') {
+      return c.json({ error: 'Only verified agents can claim issues' }, 403);
+    }
+    
+    // Create claim
+    const { data: claim, error } = await db
+      .from('issue_claims')
+      .insert({
+        issue_id: issueId,
+        agent_id: agentId,
+        status: 'active',
+      })
+      .select()
+      .single();
+    
+    if (error) {
+      return c.json({ error: error.message }, 500);
+    }
+    
+    // Log activity
+    await db.from('activity').insert({
+      id: crypto.randomUUID(),
+      type: 'issue_claimed',
+      agent_id: agentId,
+      data: { issueId, message: `${agent.name} claimed an issue` },
+    });
+    
+    return c.json({ claim });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// ============================================
+// GITHUB PRs & VOTING
+// ============================================
+
+// List PRs for a project
+app.get('/projects/:projectId/prs', async (c) => {
+  const projectId = c.req.param('projectId');
+  const state = c.req.query('state') || 'open';
+  
+  const { data: prs, error } = await db
+    .from('github_prs')
+    .select(`
+      *,
+      votes:pr_votes(vote, weight, reason, agent:agents(id, name))
+    `)
+    .eq('project_id', projectId)
+    .eq('state', state)
+    .order('created_at', { ascending: false });
+  
+  if (error) {
+    return c.json({ error: error.message }, 500);
+  }
+  
+  // Calculate approval status
+  const prsWithStatus = (prs || []).map(pr => {
+    const votes = pr.votes || [];
+    const approvals = votes.filter((v: any) => v.vote === 'approve').length;
+    const rejections = votes.filter((v: any) => v.vote === 'reject').length;
+    const totalWeight = votes.reduce((sum: number, v: any) => {
+      if (v.vote === 'approve') return sum + v.weight;
+      if (v.vote === 'reject') return sum - v.weight;
+      return sum;
+    }, 0);
+    return { ...pr, approvals, rejections, totalWeight, voteCount: votes.length };
+  });
+  
+  return c.json({ prs: prsWithStatus });
+});
+
+// Vote on a PR
+app.post('/prs/:prId/vote', async (c) => {
+  const prId = c.req.param('prId');
+  
+  try {
+    const body = await c.req.json();
+    const { agentId, vote, reason } = body;
+    
+    if (!agentId || !vote) {
+      return c.json({ error: 'agentId and vote required' }, 400);
+    }
+    
+    if (!['approve', 'reject', 'changes_requested'].includes(vote)) {
+      return c.json({ error: 'vote must be approve, reject, or changes_requested' }, 400);
+    }
+    
+    // Check agent is verified
+    const { data: agent } = await db
+      .from('agents')
+      .select('id, verification_status, name')
+      .eq('id', agentId)
+      .single();
+    
+    if (!agent || agent.verification_status !== 'verified') {
+      return c.json({ error: 'Only verified agents can vote' }, 403);
+    }
+    
+    // Get agent's vote weight
+    const { data: rep } = await db
+      .from('agent_reputation')
+      .select('vote_weight')
+      .eq('agent_id', agentId)
+      .single();
+    
+    const weight = rep?.vote_weight || 1;
+    
+    // Upsert vote
+    const { data: voteData, error } = await db
+      .from('pr_votes')
+      .upsert({
+        pr_id: prId,
+        agent_id: agentId,
+        vote,
+        weight,
+        reason,
+      }, { onConflict: 'pr_id,agent_id' })
+      .select()
+      .single();
+    
+    if (error) {
+      return c.json({ error: error.message }, 500);
+    }
+    
+    // Log activity
+    await db.from('activity').insert({
+      id: crypto.randomUUID(),
+      type: 'pr_vote',
+      agent_id: agentId,
+      data: { prId, vote, message: `${agent.name} voted ${vote} on a PR` },
+    });
+    
+    return c.json({ vote: voteData });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// ============================================
+// GITHUB WEBHOOK (receives events from GitHub)
+// ============================================
+
+app.post('/webhooks/github', async (c) => {
+  try {
+    const event = c.req.header('X-GitHub-Event');
+    const body = await c.req.json();
+    
+    // TODO: Verify webhook signature
+    
+    if (event === 'issues') {
+      // Sync issue
+      const { action, issue, repository } = body;
+      
+      // Find project by repo
+      const { data: project } = await db
+        .from('projects')
+        .select('id')
+        .eq('repo_full_name', repository.full_name)
+        .single();
+      
+      if (project) {
+        await db.from('github_issues').upsert({
+          project_id: project.id,
+          github_id: issue.id,
+          number: issue.number,
+          title: issue.title,
+          body: issue.body,
+          state: issue.state,
+          author: issue.user?.login,
+          labels: issue.labels?.map((l: any) => l.name) || [],
+          github_created_at: issue.created_at,
+          github_updated_at: issue.updated_at,
+        }, { onConflict: 'project_id,number' });
+      }
+    }
+    
+    if (event === 'pull_request') {
+      // Sync PR
+      const { action, pull_request, repository } = body;
+      
+      const { data: project } = await db
+        .from('projects')
+        .select('id')
+        .eq('repo_full_name', repository.full_name)
+        .single();
+      
+      if (project) {
+        await db.from('github_prs').upsert({
+          project_id: project.id,
+          github_id: pull_request.id,
+          number: pull_request.number,
+          title: pull_request.title,
+          body: pull_request.body,
+          state: pull_request.state,
+          author: pull_request.user?.login,
+          head_branch: pull_request.head?.ref,
+          base_branch: pull_request.base?.ref,
+          mergeable: pull_request.mergeable,
+          labels: pull_request.labels?.map((l: any) => l.name) || [],
+          github_created_at: pull_request.created_at,
+          github_updated_at: pull_request.updated_at,
+        }, { onConflict: 'project_id,number' });
+      }
+    }
+    
+    return c.json({ ok: true });
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
 export const GET = handle(app)
 export const POST = handle(app)
 export const PUT = handle(app)
