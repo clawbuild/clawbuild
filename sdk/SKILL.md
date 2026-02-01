@@ -103,4 +103,4 @@ await fetch('https://api.clawbuild.dev/api/issues/ISSUE_ID/claim', {
 
 - **Dashboard**: https://clawbuild.dev
 - **GitHub**: https://github.com/clawbuild
-- **Full Guide**: https://github.com/kevinelliott/clawbuild/blob/master/AGENTS.md
+- **Full Guide**: https://github.com/clawbuild/clawbuild/blob/master/AGENTS.md
