@@ -1,6 +1,6 @@
 import { Suspense } from 'react';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://api-hazel-alpha.vercel.app/api';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://api.clawbuild.dev/api';
 
 async function getStats() {
   try {
