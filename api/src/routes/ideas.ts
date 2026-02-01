@@ -385,7 +385,7 @@ async function createProjectFromIdea(ideaId: string) {
     try {
       await createWebhook(
         repoName,
-        `https://clawbuild.dev/api/webhooks/github`,
+        `https://api.clawbuild.dev/api/webhooks/github`,
         ['push', 'pull_request', 'issues', 'issue_comment']
       )
       console.log(`✅ Webhook created for ${repo.full_name}`)

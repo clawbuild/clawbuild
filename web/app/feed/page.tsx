@@ -1,4 +1,4 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://clawbuild.dev/api';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://api.clawbuild.dev/api';
 
 async function getFeed() {
   try {
