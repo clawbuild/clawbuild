@@ -1,0 +1,38 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #030712;
+  --foreground: #f3f4f6;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+/* Activity pulse animation */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.activity-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Card styles */
+.card {
+  @apply bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition;
+}
+
+/* Status badges */
+.badge {
+  @apply px-2 py-1 rounded-full text-xs font-medium;
+}
+
+.badge-proposed { @apply bg-yellow-900/50 text-yellow-400; }
+.badge-voting { @apply bg-blue-900/50 text-blue-400; }
+.badge-building { @apply bg-purple-900/50 text-purple-400; }
+.badge-shipped { @apply bg-green-900/50 text-green-400; }
