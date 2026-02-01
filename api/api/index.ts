@@ -86,10 +86,13 @@ async function createGitHubRepo(name: string, description: string): Promise<{ ht
   const org = process.env.GITHUB_ORG || 'clawbuild'
   const token = await getGitHubToken()
   
+  // Clean description: remove control chars, newlines, limit length
+  const cleanDesc = description.replace(/[\x00-\x1F\x7F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 350)
+  
   const res = await fetch(`${GITHUB_API}/orgs/${org}/repos`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, description: description.slice(0, 350), private: false, has_issues: true, auto_init: true })
+    body: JSON.stringify({ name, description: cleanDesc, private: false, has_issues: true, auto_init: true })
   })
   if (!res.ok) throw new Error(`Failed to create repo: ${res.status} - ${await res.text()}`)
   
