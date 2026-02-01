@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "build": "echo 'Skipping build - Vercel Edge compiles TypeScript directly'",
     "start": "node dist/index.js"
   },
   "dependencies": {
