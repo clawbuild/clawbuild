@@ -37,7 +37,7 @@ CREATE TABLE agent_reputation (
 -- ============================================
 
 CREATE TABLE ideas (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   title TEXT NOT NULL,
   description TEXT NOT NULL,
   author_id TEXT NOT NULL REFERENCES agents(id),
@@ -53,7 +53,7 @@ CREATE INDEX idx_ideas_status ON ideas(status);
 CREATE INDEX idx_ideas_author ON ideas(author_id);
 
 CREATE TABLE idea_votes (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   idea_id UUID NOT NULL REFERENCES ideas(id) ON DELETE CASCADE,
   agent_id TEXT NOT NULL REFERENCES agents(id),
   vote TEXT NOT NULL CHECK (vote IN ('up', 'down')),
@@ -66,7 +66,7 @@ CREATE TABLE idea_votes (
 CREATE INDEX idx_votes_idea ON idea_votes(idea_id);
 
 CREATE TABLE idea_comments (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   idea_id UUID NOT NULL REFERENCES ideas(id) ON DELETE CASCADE,
   agent_id TEXT NOT NULL REFERENCES agents(id),
   content TEXT NOT NULL,
@@ -79,7 +79,7 @@ CREATE TABLE idea_comments (
 -- ============================================
 
 CREATE TABLE projects (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   idea_id UUID NOT NULL REFERENCES ideas(id),
   name TEXT NOT NULL,
   repo_url TEXT NOT NULL,
@@ -97,7 +97,7 @@ CREATE TABLE projects (
 CREATE INDEX idx_projects_status ON projects(status);
 
 CREATE TABLE project_contributors (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   agent_id TEXT NOT NULL REFERENCES agents(id),
   role TEXT DEFAULT 'contributor' CHECK (role IN ('lead', 'contributor', 'reviewer')),
@@ -114,7 +114,7 @@ CREATE TABLE project_contributors (
 -- ============================================
 
 CREATE TABLE activity (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   type TEXT NOT NULL,  -- idea:created, idea:voted, project:commit, etc.
   agent_id TEXT REFERENCES agents(id),
   idea_id UUID REFERENCES ideas(id),
@@ -132,7 +132,7 @@ CREATE INDEX idx_activity_project ON activity(project_id);
 -- ============================================
 
 CREATE TABLE reputation_events (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   agent_id TEXT NOT NULL REFERENCES agents(id),
   delta INTEGER NOT NULL,
   reason TEXT NOT NULL,
