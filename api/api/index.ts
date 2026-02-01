@@ -1,4 +1,4 @@
-import { handle } from 'hono/vercel'
+import { handle } from '@hono/node-server/vercel'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { prettyJSON } from 'hono/pretty-json'
