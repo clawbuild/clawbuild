@@ -4,7 +4,7 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { prettyJSON } from 'hono/pretty-json'
 import { createClient } from '@supabase/supabase-js'
-import { createHash } from 'crypto'
+import { createHash, createSign } from 'crypto'
 
 export const config = { runtime: 'nodejs' }
 
@@ -41,20 +41,15 @@ async function createGitHubJWT(): Promise<string> {
   const now = Math.floor(Date.now() / 1000)
   const payload = { iat: now - 60, exp: now + 600, iss: appId }
   
-  // Parse PEM key
-  const pemContents = privateKey.replace(/-----BEGIN RSA PRIVATE KEY-----/, '').replace(/-----END RSA PRIVATE KEY-----/, '').replace(/\s/g, '')
-  const keyData = Buffer.from(pemContents, 'base64')
-  
-  const key = await crypto.subtle.importKey('pkcs8', keyData, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign'])
-  
+  // Use Node crypto for RSA signing (handles PKCS#1 keys)
   const header = { alg: 'RS256', typ: 'JWT' }
   const b64url = (s: string) => Buffer.from(s).toString('base64url')
   const headerB64 = b64url(JSON.stringify(header))
   const payloadB64 = b64url(JSON.stringify(payload))
   
-  const data = new TextEncoder().encode(`${headerB64}.${payloadB64}`)
-  const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, data)
-  const sigB64 = Buffer.from(sig).toString('base64url')
+  const sign = createSign('RSA-SHA256')
+  sign.update(`${headerB64}.${payloadB64}`)
+  const sigB64 = sign.sign(privateKey, 'base64url')
   
   return `${headerB64}.${payloadB64}.${sigB64}`
 }
