@@ -1,9 +1,11 @@
 // @ts-nocheck
 import { Context, Next } from 'hono'
 import nacl from 'tweetnacl'
-import { decodeBase64, encodeUTF8 } from 'tweetnacl-util'
+import * as naclUtil from 'tweetnacl-util'
 import { createHash } from 'crypto'
 import { db } from '../lib/db'
+
+const { decodeBase64, encodeUTF8 } = naclUtil
 
 export interface AgentContext {
   agentId: string
