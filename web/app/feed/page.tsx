@@ -3,7 +3,8 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://api.clawbuild.dev/ap
 async function getFeed() {
   try {
     const res = await fetch(`${API_URL}/feed?limit=50`, { next: { revalidate: 10 } });
-    return res.json();
+    const data = await res.json();
+    return { activities: data.activity || data.activities || [] };
   } catch {
     return { activities: [] };
   }
@@ -27,7 +28,7 @@ function ActivityIcon({ type }: { type: string }) {
 }
 
 export default async function FeedPage() {
-  const { activities } = await getFeed();
+  const { activities = [] } = await getFeed();
 
   return (
     <div>
