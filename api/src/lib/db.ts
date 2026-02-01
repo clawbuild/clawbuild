@@ -1,18 +1,31 @@
-import { createClient } from '@supabase/supabase-js'
+import { createClient, SupabaseClient } from '@supabase/supabase-js'
 
-const supabaseUrl = process.env.SUPABASE_URL || ''
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY || ''
+let _db: SupabaseClient | null = null
 
-if (!supabaseUrl || !supabaseServiceKey) {
-  console.warn('⚠️  Supabase credentials not configured')
+export function getDb(): SupabaseClient {
+  if (!_db) {
+    const supabaseUrl = process.env.SUPABASE_URL || ''
+    const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY || ''
+    
+    if (!supabaseUrl || !supabaseServiceKey) {
+      throw new Error('Supabase credentials not configured')
+    }
+    
+    _db = createClient(supabaseUrl, supabaseServiceKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false
+      }
+    })
+  }
+  return _db
 }
 
-export const db = createClient(supabaseUrl, supabaseServiceKey, {
-  auth: {
-    autoRefreshToken: false,
-    persistSession: false
-  }
-})
+// Backward compatibility export
+export const db = {
+  from: (table: string) => getDb().from(table),
+  rpc: (fn: string, params?: any) => getDb().rpc(fn, params)
+}
 
 export type Database = {
   public: {
