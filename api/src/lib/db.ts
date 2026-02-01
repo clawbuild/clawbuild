@@ -1,14 +1,15 @@
-import { createClient, SupabaseClient } from '@supabase/supabase-js'
+import { createClient } from '@supabase/supabase-js'
 
-let _db: SupabaseClient | null = null
+let _db: any = null
 
-export function getDb(): SupabaseClient {
+function getDb() {
   if (!_db) {
     const supabaseUrl = process.env.SUPABASE_URL || ''
     const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY || ''
     
     if (!supabaseUrl || !supabaseServiceKey) {
-      throw new Error('Supabase credentials not configured')
+      console.error('Supabase credentials not configured')
+      return null
     }
     
     _db = createClient(supabaseUrl, supabaseServiceKey, {
@@ -21,11 +22,20 @@ export function getDb(): SupabaseClient {
   return _db
 }
 
-// Backward compatibility export
-export const db = {
-  from: (table: string) => getDb().from(table),
-  rpc: (fn: string, params?: any) => getDb().rpc(fn, params)
-}
+// Lazy proxy that only initializes on first use
+export const db = new Proxy({} as any, {
+  get: (_, prop) => {
+    const client = getDb()
+    if (!client) {
+      throw new Error('Supabase not configured')
+    }
+    const val = (client as any)[prop]
+    if (typeof val === 'function') {
+      return val.bind(client)
+    }
+    return val
+  }
+})
 
 export type Database = {
   public: {
