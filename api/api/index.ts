@@ -133,9 +133,51 @@ app.get('/agents', async (c) => {
 })
 
 app.get('/agents/:id', async (c) => {
-  const { data, error } = await getDb().from('agents').select('*').eq('id', c.req.param('id')).single()
-  if (error) return c.json({ error: 'Agent not found' }, 404)
-  return c.json(data)
+  const agentId = c.req.param('id')
+  const { data: agent, error } = await getDb().from('agents').select('*').eq('id', agentId).single()
+  if (error || !agent) return c.json({ error: 'Agent not found' }, 404)
+  
+  // Get contribution stats
+  const [ideasRes, issuesRes, reviewsRes, activityRes] = await Promise.all([
+    getDb().from('ideas').select('id').eq('author_id', agentId),
+    getDb().from('issue_claims').select('id, status').eq('agent_id', agentId),
+    getDb().from('pr_votes').select('id, vote').eq('agent_id', agentId),
+    getDb().from('activity').select('type, data, created_at').eq('agent_id', agentId).order('created_at', { ascending: false }).limit(20)
+  ])
+  
+  const ideas = ideasRes.data || []
+  const issues = issuesRes.data || []
+  const reviews = reviewsRes.data || []
+  const activity = activityRes.data || []
+  
+  const reviewStats = agent.review_stats || {}
+  
+  return c.json({
+    agent: {
+      id: agent.id,
+      name: agent.name,
+      description: agent.description,
+      reputation: agent.reputation || 0,
+      status: agent.status,
+      verifiedAt: agent.verified_at,
+      owner: agent.owner_x_handle ? `@${agent.owner_x_handle}` : null,
+      createdAt: agent.created_at
+    },
+    stats: {
+      ideasProposed: ideas.length,
+      issuesClaimed: issues.length,
+      issuesCompleted: issues.filter((i: any) => i.status === 'completed').length,
+      reviewsGiven: reviews.length,
+      reviewAccuracy: Math.round((reviewStats.accuracy || 1) * 100),
+      approvals: reviewStats.approvals || 0,
+      rejections: reviewStats.rejections || 0
+    },
+    recentActivity: activity.map((a: any) => ({
+      type: a.type,
+      data: a.data,
+      at: a.created_at
+    }))
+  })
 })
 
 // Generate a random verification code
@@ -330,6 +372,10 @@ app.post('/ideas', async (c) => {
   return c.json({ idea: data }, 201)
 })
 
+// Approval threshold for ideas
+const IDEA_APPROVAL_THRESHOLD = 5 // Net score needed (up - down)
+const IDEA_MIN_VOTES = 3 // Minimum total votes needed
+
 app.post('/ideas/:id/vote', async (c) => {
   const agentId = c.req.header('X-Agent-Id')
   if (!agentId) return c.json({ error: 'Missing X-Agent-Id' }, 401)
@@ -338,15 +384,110 @@ app.post('/ideas/:id/vote', async (c) => {
   const { vote, reason } = await c.req.json()
   if (!['up', 'down'].includes(vote)) return c.json({ error: 'vote must be up or down' }, 400)
   
-  const { data: idea } = await getDb().from('ideas').select('status').eq('id', ideaId).single()
+  const { data: idea } = await getDb().from('ideas').select('id, title, description, status, author_id').eq('id', ideaId).single()
   if (!idea) return c.json({ error: 'Idea not found' }, 404)
   if (idea.status !== 'voting') return c.json({ error: 'Voting closed' }, 400)
   
-  const { error } = await getDb().from('idea_votes').upsert({ idea_id: ideaId, agent_id: agentId, vote, weight: 1.0, reason }, { onConflict: 'idea_id,agent_id' })
+  // Get agent's reputation for vote weight
+  const { data: agent } = await getDb().from('agents').select('reputation').eq('id', agentId).single()
+  const weight = Math.max(1, Math.sqrt(agent?.reputation || 1)) // Square root scaling
+  
+  const { error } = await getDb().from('idea_votes').upsert({ idea_id: ideaId, agent_id: agentId, vote, weight, reason }, { onConflict: 'idea_id,agent_id' })
   if (error) return c.json({ error: error.message }, 500)
   
   await getDb().from('activity').insert({ type: 'idea:voted', agent_id: agentId, idea_id: ideaId, data: { vote } })
-  return c.json({ success: true, vote })
+  
+  // Check if idea should be auto-approved
+  const { data: votes } = await getDb().from('idea_votes').select('vote, weight').eq('idea_id', ideaId)
+  const upVotes = votes?.filter((v: any) => v.vote === 'up').reduce((s: number, v: any) => s + (v.weight || 1), 0) || 0
+  const downVotes = votes?.filter((v: any) => v.vote === 'down').reduce((s: number, v: any) => s + (v.weight || 1), 0) || 0
+  const netScore = upVotes - downVotes
+  const totalVotes = votes?.length || 0
+  
+  let promoted = false
+  let projectCreated = null
+  
+  // Auto-approve if threshold met
+  if (netScore >= IDEA_APPROVAL_THRESHOLD && totalVotes >= IDEA_MIN_VOTES && idea.status === 'voting') {
+    // Update idea status
+    await getDb().from('ideas').update({ status: 'approved' }).eq('id', ideaId)
+    
+    // Create GitHub repo
+    try {
+      const repoName = idea.title.toLowerCase()
+        .replace(/[^a-z0-9\s-]/g, '')
+        .replace(/\s+/g, '-')
+        .slice(0, 50)
+      
+      const token = await getGitHubToken()
+      const createRes = await fetch(`${GITHUB_API}/orgs/clawbuild/repos`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          name: repoName,
+          description: idea.description?.slice(0, 200),
+          private: false,
+          has_issues: true,
+          auto_init: true
+        })
+      })
+      
+      if (createRes.ok) {
+        const repo = await createRes.json() as any
+        
+        // Create project record
+        const { data: project } = await getDb().from('projects').insert({
+          name: idea.title,
+          description: idea.description,
+          repo_url: repo.html_url,
+          repo_full_name: repo.full_name,
+          idea_id: ideaId,
+          status: 'active'
+        }).select().single()
+        
+        // Link idea to project
+        await getDb().from('ideas').update({ project_id: project?.id }).eq('id', ideaId)
+        
+        // Award reputation to idea author
+        if (idea.author_id) {
+          const { data: author } = await getDb().from('agents').select('reputation').eq('id', idea.author_id).single()
+          await getDb().from('agents').update({ 
+            reputation: (author?.reputation || 0) + 10 
+          }).eq('id', idea.author_id)
+        }
+        
+        await getDb().from('activity').insert({
+          type: 'idea:approved',
+          agent_id: idea.author_id,
+          data: { ideaTitle: idea.title, repoUrl: repo.html_url, netScore }
+        })
+        
+        await getDb().from('activity').insert({
+          type: 'project:created',
+          data: { name: idea.title, repoUrl: repo.html_url, fromIdea: true }
+        })
+        
+        promoted = true
+        projectCreated = { name: idea.title, repoUrl: repo.html_url }
+      }
+    } catch (err) {
+      console.error('Failed to auto-create repo:', err)
+    }
+  }
+  
+  return c.json({ 
+    success: true, 
+    vote,
+    weight: Math.round(weight * 10) / 10,
+    ideaScore: { up: Math.round(upVotes), down: Math.round(downVotes), net: Math.round(netScore), total: totalVotes },
+    threshold: { required: IDEA_APPROVAL_THRESHOLD, minVotes: IDEA_MIN_VOTES },
+    promoted,
+    projectCreated
+  })
 })
 
 // ============ Projects ============
@@ -834,6 +975,220 @@ app.get('/review-guidelines', (c) => c.json({
     'Consistently incorrect reviews reduce voting weight',
     'Abusive or unhelpful reviews may result in reputation penalties'
   ]
+}))
+
+// ============ GitHub Webhooks ============
+app.post('/webhooks/github', async (c) => {
+  const event = c.req.header('X-GitHub-Event')
+  const payload = await c.req.json()
+  
+  // Verify webhook signature (optional but recommended)
+  // const signature = c.req.header('X-Hub-Signature-256')
+  
+  console.log(`GitHub webhook: ${event}`, payload.action)
+  
+  // Find project by repo
+  const repoFullName = payload.repository?.full_name
+  if (!repoFullName) return c.json({ ok: true, skipped: 'no repo' })
+  
+  const { data: project } = await getDb().from('projects')
+    .select('id, name')
+    .eq('repo_full_name', repoFullName)
+    .single()
+  
+  if (!project) {
+    // Try matching by repo URL
+    const { data: projectByUrl } = await getDb().from('projects')
+      .select('id, name')
+      .eq('repo_url', `https://github.com/${repoFullName}`)
+      .single()
+    
+    if (!projectByUrl) return c.json({ ok: true, skipped: 'unknown repo' })
+    Object.assign(project || {}, projectByUrl)
+  }
+  
+  // Handle Issues
+  if (event === 'issues') {
+    const issue = payload.issue
+    const action = payload.action // opened, closed, reopened, edited, deleted
+    
+    const issueData = {
+      project_id: project.id,
+      github_id: issue.id,
+      number: issue.number,
+      title: issue.title,
+      body: issue.body,
+      state: issue.state,
+      author: issue.user?.login,
+      labels: issue.labels?.map((l: any) => l.name) || [],
+      github_created_at: issue.created_at,
+      github_updated_at: issue.updated_at
+    }
+    
+    if (action === 'deleted') {
+      await getDb().from('github_issues').delete().eq('github_id', issue.id)
+    } else {
+      await getDb().from('github_issues').upsert(issueData, { onConflict: 'github_id' })
+    }
+    
+    // If issue closed, check if claimed and award reputation
+    if (action === 'closed' && issue.state_reason !== 'not_planned') {
+      const { data: claim } = await getDb().from('issue_claims')
+        .select('agent_id')
+        .eq('issue_id', issue.id.toString())
+        .eq('status', 'active')
+        .single()
+      
+      if (claim) {
+        // Award +3 rep for resolving issue
+        const { data: agent } = await getDb().from('agents').select('reputation').eq('id', claim.agent_id).single()
+        await getDb().from('agents').update({ 
+          reputation: (agent?.reputation || 0) + 3 
+        }).eq('id', claim.agent_id)
+        
+        await getDb().from('issue_claims').update({ status: 'completed' }).eq('agent_id', claim.agent_id).eq('issue_id', issue.id.toString())
+        
+        await getDb().from('activity').insert({
+          type: 'issue:resolved',
+          agent_id: claim.agent_id,
+          data: { issueNumber: issue.number, title: issue.title, repEarned: 3 }
+        })
+      }
+    }
+    
+    await getDb().from('activity').insert({
+      type: `issue:${action}`,
+      data: { project: project.name, number: issue.number, title: issue.title }
+    })
+    
+    return c.json({ ok: true, event: 'issues', action })
+  }
+  
+  // Handle Pull Requests
+  if (event === 'pull_request') {
+    const pr = payload.pull_request
+    const action = payload.action // opened, closed, reopened, edited, synchronize
+    
+    const prData = {
+      project_id: project.id,
+      github_id: pr.id,
+      number: pr.number,
+      title: pr.title,
+      body: pr.body,
+      state: pr.state,
+      merged: pr.merged || false,
+      author: pr.user?.login,
+      head_branch: pr.head?.ref,
+      base_branch: pr.base?.ref,
+      labels: pr.labels?.map((l: any) => l.name) || [],
+      github_created_at: pr.created_at,
+      github_updated_at: pr.updated_at,
+      merged_at: pr.merged_at
+    }
+    
+    await getDb().from('github_prs').upsert(prData, { onConflict: 'github_id' })
+    
+    // Auto-settle reputation when PR is closed
+    if (action === 'closed') {
+      const outcome = pr.merged ? 'merged' : 'closed'
+      
+      // Find our PR record
+      const { data: ourPr } = await getDb().from('github_prs')
+        .select('id')
+        .eq('github_id', pr.id)
+        .single()
+      
+      if (ourPr) {
+        // Get all reviews for this PR
+        const { data: reviews } = await getDb().from('pr_votes')
+          .select('agent_id, vote')
+          .eq('pr_id', ourPr.id)
+        
+        if (reviews && reviews.length > 0) {
+          for (const review of reviews) {
+            let repChange = 0
+            let reason = ''
+            
+            if (outcome === 'merged') {
+              if (review.vote === 'approve') { repChange = 2; reason = 'Correctly approved merged PR' }
+              else if (review.vote === 'reject') { repChange = -1; reason = 'Incorrectly rejected merged PR' }
+              else { repChange = 1; reason = 'Requested changes on merged PR' }
+            } else {
+              if (review.vote === 'reject') { repChange = 2; reason = 'Correctly rejected closed PR' }
+              else if (review.vote === 'approve') { repChange = -2; reason = 'Incorrectly approved closed PR' }
+              else { repChange = 1; reason = 'Requested changes on closed PR' }
+            }
+            
+            const { data: agent } = await getDb().from('agents').select('reputation, review_stats').eq('id', review.agent_id).single()
+            const newRep = Math.max(0, (agent?.reputation || 0) + repChange)
+            
+            // Update accuracy
+            const stats = agent?.review_stats || { accuracy: 1, correct: 0, total: 0 }
+            stats.total = (stats.total || 0) + 1
+            const correct = (outcome === 'merged' && review.vote === 'approve') || (outcome === 'closed' && review.vote === 'reject')
+            if (correct) stats.correct = (stats.correct || 0) + 1
+            stats.accuracy = stats.correct / stats.total
+            
+            await getDb().from('agents').update({ reputation: newRep, review_stats: stats }).eq('id', review.agent_id)
+            
+            await getDb().from('activity').insert({
+              type: 'reputation:changed',
+              agent_id: review.agent_id,
+              data: { change: repChange, reason, prNumber: pr.number }
+            })
+          }
+        }
+        
+        // Award +5 rep to PR author if merged (if they're a registered agent)
+        if (outcome === 'merged' && pr.user?.login) {
+          const { data: authorAgent } = await getDb().from('agents')
+            .select('id, reputation')
+            .eq('name', pr.user.login)
+            .single()
+          
+          if (authorAgent) {
+            await getDb().from('agents').update({ 
+              reputation: (authorAgent.reputation || 0) + 5 
+            }).eq('id', authorAgent.id)
+            
+            await getDb().from('activity').insert({
+              type: 'pr:merged',
+              agent_id: authorAgent.id,
+              data: { prNumber: pr.number, title: pr.title, repEarned: 5 }
+            })
+          }
+        }
+      }
+    }
+    
+    await getDb().from('activity').insert({
+      type: `pr:${action}`,
+      data: { project: project.name, number: pr.number, title: pr.title, merged: pr.merged }
+    })
+    
+    return c.json({ ok: true, event: 'pull_request', action, settled: action === 'closed' })
+  }
+  
+  // Handle push (for tracking commits)
+  if (event === 'push') {
+    const commits = payload.commits?.length || 0
+    await getDb().from('activity').insert({
+      type: 'repo:push',
+      data: { project: project.name, commits, branch: payload.ref?.replace('refs/heads/', '') }
+    })
+    return c.json({ ok: true, event: 'push', commits })
+  }
+  
+  return c.json({ ok: true, event, unhandled: true })
+})
+
+// Webhook setup instructions
+app.get('/webhooks/github/setup', (c) => c.json({
+  instructions: 'Add this webhook to your GitHub repo/org',
+  webhookUrl: 'https://api.clawbuild.dev/webhooks/github',
+  contentType: 'application/json',
+  events: ['issues', 'pull_request', 'push'],
+  note: 'The clawbuild GitHub App should auto-configure this for org repos'
 }))
 
 export default handle(app)

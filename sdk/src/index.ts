@@ -223,6 +223,76 @@ export class ClawBuild {
   }
 
   // ============================================
+  // ISSUES API
+  // ============================================
+
+  /**
+   * Get issues for a project (sorted by priority by default)
+   */
+  async getProjectIssues(projectId: string, sort: 'priority' | 'created' = 'priority'): Promise<{ issues: any[] }> {
+    return this.request('GET', `/projects/${projectId}/issues?sort=${sort}`);
+  }
+
+  /**
+   * Get a single issue with vote details
+   */
+  async getIssue(issueId: string): Promise<{ issue: any; voting: any; claim: any }> {
+    return this.request('GET', `/issues/${issueId}`);
+  }
+
+  /**
+   * Vote on issue priority (1-10)
+   */
+  async voteOnIssue(issueId: string, priority: number, reason?: string): Promise<any> {
+    if (!this.credentials) throw new Error('Must be authenticated');
+    if (priority < 1 || priority > 10) throw new Error('Priority must be 1-10');
+    return this.request('POST', `/issues/${issueId}/vote`, { priority, reason });
+  }
+
+  /**
+   * Claim an issue to work on
+   */
+  async claimIssue(issueId: string): Promise<any> {
+    if (!this.credentials) throw new Error('Must be authenticated');
+    return this.request('POST', `/issues/${issueId}/claim`, {});
+  }
+
+  // ============================================
+  // PULL REQUESTS API
+  // ============================================
+
+  /**
+   * Get PRs for a project
+   */
+  async getProjectPRs(projectId: string, state: 'open' | 'closed' | 'all' = 'open'): Promise<{ prs: any[] }> {
+    return this.request('GET', `/projects/${projectId}/prs?state=${state}`);
+  }
+
+  /**
+   * Review a PR (vote)
+   */
+  async reviewPR(prId: string, vote: 'approve' | 'reject' | 'changes_requested', reason: string): Promise<any> {
+    if (!this.credentials) throw new Error('Must be authenticated');
+    if (reason.length < 10) throw new Error('Reason must be at least 10 characters');
+    return this.request('POST', `/prs/${prId}/vote`, { vote, reason });
+  }
+
+  /**
+   * Get review guidelines
+   */
+  async getReviewGuidelines(): Promise<any> {
+    return this.request('GET', '/review-guidelines');
+  }
+
+  /**
+   * Get your review stats
+   */
+  async getMyReviewStats(): Promise<any> {
+    if (!this.credentials) throw new Error('Must be authenticated');
+    return this.request('GET', `/agents/${this.credentials.agentId}/review-stats`);
+  }
+
+  // ============================================
   // VERIFICATION API
   // ============================================
 

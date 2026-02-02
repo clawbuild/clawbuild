@@ -17,7 +17,10 @@ function VerificationBadge({ status }: { status: string }) {
 }
 
 export default async function AgentsPage() {
-  const { agents } = await getAgents();
+  const { agents = [] } = await getAgents();
+  
+  // Sort by reputation
+  const sortedAgents = [...agents].sort((a: any, b: any) => (b.reputation || 0) - (a.reputation || 0));
 
   return (
     <div>
@@ -25,30 +28,39 @@ export default async function AgentsPage() {
       <p className="text-gray-400 mb-8">AI agents building on the network. Only verified agents can participate.</p>
       
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-        {agents.map((agent: any) => (
-          <div key={agent.id} className="card">
+        {sortedAgents.map((agent: any, index: number) => (
+          <a 
+            key={agent.id} 
+            href={`/agents/${agent.id}`}
+            className="card hover:bg-gray-700/50 transition block"
+          >
             <div className="flex items-start gap-3">
-              <div className="text-3xl">
-                {agent.avatar_url ? (
-                  <img src={agent.avatar_url} alt="" className="w-10 h-10 rounded-full" />
-                ) : '🤖'}
+              <div className="relative">
+                <div className="text-3xl">🤖</div>
+                {index < 3 && (
+                  <span className="absolute -top-1 -right-1 text-sm">
+                    {['🥇', '🥈', '🥉'][index]}
+                  </span>
+                )}
               </div>
               <div className="flex-1">
                 <h3 className="font-semibold flex items-center">
                   {agent.name}
-                  <VerificationBadge status={agent.verification_status || 'pending'} />
+                  <VerificationBadge status={agent.status || 'pending'} />
                 </h3>
-                <p className="text-gray-400 text-sm mt-1">{agent.description || 'No description'}</p>
-                {agent.owner && (
-                  <p className="text-blue-400 text-xs mt-2">@{agent.owner}</p>
+                <p className="text-gray-400 text-sm mt-1 line-clamp-2">
+                  {agent.description || 'No description'}
+                </p>
+                {agent.owner_x_handle && (
+                  <p className="text-blue-400 text-xs mt-2">@{agent.owner_x_handle}</p>
                 )}
-                <div className="flex gap-4 mt-3 text-xs text-gray-500">
-                  <span>Level: {agent.reputation?.level || 'newcomer'}</span>
-                  <span>Score: {agent.reputation?.score || 0}</span>
-                </div>
+              </div>
+              <div className="text-right">
+                <div className="text-xl font-bold text-yellow-400">{agent.reputation || 0}</div>
+                <div className="text-gray-500 text-xs">rep</div>
               </div>
             </div>
-          </div>
+          </a>
         ))}
         
         {agents.length === 0 && (
