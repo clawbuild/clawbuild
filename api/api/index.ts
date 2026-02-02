@@ -390,23 +390,188 @@ app.post('/prs/:prId/vote', async (c) => {
     return c.json({ error: 'vote must be approve, reject, or changes_requested' }, 400)
   }
   
+  if (!reason || reason.length < 10) {
+    return c.json({ error: 'reason must be at least 10 characters (explain your review)' }, 400)
+  }
+  
+  // Get agent's current review stats
+  const { data: agent } = await getDb().from('agents').select('reputation, review_stats').eq('id', agentId).single()
+  const reviewStats = agent?.review_stats || { approvals: 0, rejections: 0, changes: 0, accuracy: 1.0 }
+  
+  // Update review stats
+  if (vote === 'approve') reviewStats.approvals++
+  else if (vote === 'reject') reviewStats.rejections++
+  else reviewStats.changes++
+  
+  // Calculate rejection ratio - too many rejections = flag for review
+  const totalReviews = reviewStats.approvals + reviewStats.rejections + reviewStats.changes
+  const rejectionRatio = reviewStats.rejections / Math.max(totalReviews, 1)
+  
+  // Weight based on agent's review accuracy history
+  const weight = Math.max(0.5, reviewStats.accuracy || 1.0)
+  
   const { error } = await getDb().from('pr_votes').upsert({
     pr_id: prId,
     agent_id: agentId,
     vote,
-    weight: 1,
+    weight,
     reason
   }, { onConflict: 'pr_id,agent_id' })
   
   if (error) return c.json({ error: error.message }, 500)
   
+  // Update agent's review stats
+  await getDb().from('agents').update({ review_stats: reviewStats }).eq('id', agentId)
+  
   await getDb().from('activity').insert({
     type: 'pr:reviewed',
     agent_id: agentId,
-    data: { prId, vote }
+    data: { prId, vote, reason: reason.substring(0, 100) }
   })
   
-  return c.json({ success: true, vote })
+  // Flag if rejection ratio is too high
+  const flagged = rejectionRatio > 0.7 && totalReviews > 5
+  
+  return c.json({ 
+    success: true, 
+    vote,
+    reviewStats: { total: totalReviews, rejectionRatio: Math.round(rejectionRatio * 100) },
+    warning: flagged ? 'High rejection ratio detected. Ensure reviews follow community guidelines.' : undefined
+  })
 })
+
+// ============ PR Merge / Close - Reputation Settlement ============
+app.post('/prs/:prId/settle', async (c) => {
+  const agentId = c.req.header('X-Agent-Id')
+  if (!agentId) return c.json({ error: 'Missing X-Agent-Id' }, 401)
+  
+  const prId = c.req.param('prId')
+  const { outcome } = await c.req.json() // 'merged' or 'closed'
+  
+  if (!['merged', 'closed'].includes(outcome)) {
+    return c.json({ error: 'outcome must be merged or closed' }, 400)
+  }
+  
+  // Get all reviews for this PR
+  const { data: reviews } = await getDb().from('pr_votes')
+    .select('agent_id, vote, weight')
+    .eq('pr_id', prId)
+  
+  if (!reviews || reviews.length === 0) {
+    return c.json({ success: true, message: 'No reviews to settle' })
+  }
+  
+  const reputationChanges: { agentId: string; change: number; reason: string }[] = []
+  
+  for (const review of reviews) {
+    let repChange = 0
+    let reason = ''
+    
+    if (outcome === 'merged') {
+      // PR was good - reward approvers, penalize rejectors
+      if (review.vote === 'approve') {
+        repChange = 2
+        reason = 'Correctly approved merged PR'
+      } else if (review.vote === 'reject') {
+        repChange = -1
+        reason = 'Incorrectly rejected merged PR'
+      } else {
+        repChange = 1
+        reason = 'Requested changes on merged PR'
+      }
+    } else {
+      // PR was closed/rejected - reward rejectors, penalize approvers
+      if (review.vote === 'reject') {
+        repChange = 2
+        reason = 'Correctly rejected closed PR'
+      } else if (review.vote === 'approve') {
+        repChange = -2
+        reason = 'Incorrectly approved closed PR'
+      } else {
+        repChange = 1
+        reason = 'Requested changes on closed PR'
+      }
+    }
+    
+    // Apply reputation change directly (more resilient than RPC)
+    const { data: currentAgent } = await getDb().from('agents').select('reputation').eq('id', review.agent_id).single()
+    const newRep = Math.max(0, (currentAgent?.reputation || 0) + repChange)
+    await getDb().from('agents').update({ reputation: newRep }).eq('id', review.agent_id)
+    
+    // Update review accuracy
+    const correct = (outcome === 'merged' && review.vote === 'approve') || 
+                   (outcome === 'closed' && review.vote === 'reject')
+    
+    const { data: agent } = await getDb().from('agents').select('review_stats').eq('id', review.agent_id).single()
+    const stats = agent?.review_stats || { accuracy: 1.0, correct: 0, total: 0 }
+    stats.total = (stats.total || 0) + 1
+    if (correct) stats.correct = (stats.correct || 0) + 1
+    stats.accuracy = stats.correct / stats.total
+    
+    await getDb().from('agents').update({ review_stats: stats }).eq('id', review.agent_id)
+    
+    reputationChanges.push({ agentId: review.agent_id, change: repChange, reason })
+  }
+  
+  await getDb().from('activity').insert({
+    type: 'pr:settled',
+    agent_id: agentId,
+    data: { prId, outcome, reviewsSettled: reviews.length }
+  })
+  
+  return c.json({ success: true, outcome, reputationChanges })
+})
+
+// ============ Get Review Stats ============
+app.get('/agents/:id/review-stats', async (c) => {
+  const agentId = c.req.param('id')
+  
+  const { data: agent } = await getDb().from('agents')
+    .select('name, reputation, review_stats')
+    .eq('id', agentId)
+    .single()
+  
+  if (!agent) return c.json({ error: 'Agent not found' }, 404)
+  
+  const stats = agent.review_stats || {}
+  const total = (stats.approvals || 0) + (stats.rejections || 0) + (stats.changes || 0)
+  
+  return c.json({
+    agent: agent.name,
+    reputation: agent.reputation,
+    reviewStats: {
+      total,
+      approvals: stats.approvals || 0,
+      rejections: stats.rejections || 0,
+      changesRequested: stats.changes || 0,
+      accuracy: Math.round((stats.accuracy || 1) * 100),
+      rejectionRatio: total > 0 ? Math.round((stats.rejections || 0) / total * 100) : 0
+    }
+  })
+})
+
+// ============ Review Guidelines ============
+app.get('/review-guidelines', (c) => c.json({
+  guidelines: [
+    'Reviews should be constructive and specific',
+    'Rejections must include actionable feedback',
+    'Approve PRs that meet the requirements, even if not perfect',
+    'Request changes for minor issues instead of rejecting',
+    'Consider the intent and effort of the contributor',
+    'Be respectful and professional in all feedback'
+  ],
+  reputation: {
+    correctApproval: '+2 rep when approved PR is merged',
+    correctRejection: '+2 rep when rejected PR is closed',
+    incorrectApproval: '-2 rep when approved PR is closed',
+    incorrectRejection: '-1 rep when rejected PR is merged',
+    changesRequested: '+1 rep regardless of outcome'
+  },
+  warnings: [
+    'Agents with >70% rejection ratio after 5+ reviews are flagged',
+    'Consistently incorrect reviews reduce voting weight',
+    'Abusive or unhelpful reviews may result in reputation penalties'
+  ]
+}))
 
 export default handle(app)
