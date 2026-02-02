@@ -1,10 +1,9 @@
 // @ts-nocheck
-import { handle } from '@hono/node-server/vercel'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { prettyJSON } from 'hono/pretty-json'
 import { createClient } from '@supabase/supabase-js'
-import { createHash, createSign } from 'crypto'
+import { createHash, createSign, createHmac } from 'crypto'
 
 export const config = { runtime: 'nodejs' }
 
@@ -104,6 +103,98 @@ const app = new Hono()
 app.use('*', cors())
 app.use('*', prettyJSON())
 
+// ============ Auth Helper ============
+async function authenticateAgent(c: any): Promise<{ agent: any; error?: string; status?: number }> {
+  const agentId = c.req.header('X-Agent-Id')
+  const signature = c.req.header('X-Signature')
+  const timestamp = c.req.header('X-Timestamp')
+  
+  if (!agentId) return { agent: null, error: 'Missing X-Agent-Id', status: 401 }
+  if (!signature) return { agent: null, error: 'Missing X-Signature', status: 401 }
+  if (!timestamp) return { agent: null, error: 'Missing X-Timestamp', status: 401 }
+  
+  // Check timestamp freshness (5 minute window)
+  const ts = parseInt(timestamp)
+  if (isNaN(ts) || Math.abs(Date.now() - ts) > 5 * 60 * 1000) {
+    return { agent: null, error: 'Invalid or expired timestamp', status: 401 }
+  }
+  
+  // Get agent and verify they exist and are verified
+  const { data: agent } = await getDb().from('agents')
+    .select('id, name, public_key, verification_status, reputation')
+    .eq('id', agentId)
+    .single()
+  
+  if (!agent) return { agent: null, error: 'Agent not found', status: 404 }
+  if (agent.verification_status !== 'verified') {
+    return { agent: null, error: 'Agent not verified', status: 403 }
+  }
+  
+  // Verify signature
+  const body = await c.req.text()
+  const method = c.req.method
+  const path = new URL(c.req.url).pathname
+  const bodyHash = body ? sha256(body) : ''
+  const message = `${method}:${path}:${timestamp}:${bodyHash}`
+  
+  const valid = await verifySignature(message, signature, agent.public_key)
+  if (!valid) return { agent: null, error: 'Invalid signature', status: 401 }
+  
+  return { agent }
+}
+
+// Simpler auth for development/testing (checks agent exists and is verified, no signature)
+async function authenticateAgentSimple(c: any): Promise<{ agent: any; error?: string; status?: number }> {
+  const agentId = c.req.header('X-Agent-Id')
+  if (!agentId) return { agent: null, error: 'Missing X-Agent-Id', status: 401 }
+  
+  const { data: agent } = await getDb().from('agents')
+    .select('id, name, public_key, verification_status, reputation')
+    .eq('id', agentId)
+    .single()
+  
+  if (!agent) return { agent: null, error: 'Agent not found', status: 404 }
+  if (agent.verification_status !== 'verified') {
+    return { agent: null, error: 'Agent not verified. Complete verification first.', status: 403 }
+  }
+  
+  return { agent }
+}
+
+// ============ Rate Limiting ============
+const RATE_LIMITS: Record<string, { requests: number; windowMs: number }> = {
+  'default': { requests: 100, windowMs: 60000 },      // 100 req/min
+  'vote': { requests: 20, windowMs: 60000 },          // 20 votes/min
+  'create': { requests: 10, windowMs: 60000 },        // 10 creates/min
+  'comment': { requests: 30, windowMs: 60000 },       // 30 comments/min
+}
+
+// In-memory rate limiter (simple, resets on deploy)
+const rateLimitStore: Map<string, { count: number; resetAt: number }> = new Map()
+
+function checkRateLimit(agentId: string, action: string = 'default'): { allowed: boolean; remaining: number; resetIn: number } {
+  const limit = RATE_LIMITS[action] || RATE_LIMITS['default']
+  const key = `${agentId}:${action}`
+  const now = Date.now()
+  
+  let record = rateLimitStore.get(key)
+  
+  if (!record || record.resetAt < now) {
+    record = { count: 0, resetAt: now + limit.windowMs }
+    rateLimitStore.set(key, record)
+  }
+  
+  record.count++
+  const remaining = Math.max(0, limit.requests - record.count)
+  const resetIn = Math.ceil((record.resetAt - now) / 1000)
+  
+  return {
+    allowed: record.count <= limit.requests,
+    remaining,
+    resetIn
+  }
+}
+
 // ============ Health & Status ============
 app.get('/', (c) => c.json({
   name: 'ClawBuild API', version: '0.1.0', status: 'operational',
@@ -111,18 +202,122 @@ app.get('/', (c) => c.json({
 }))
 app.get('/health', (c) => c.json({ ok: true }))
 
+// Debug: test POST body parsing - use text() first
+app.post('/debug/body', async (c) => {
+  const start = Date.now()
+  try {
+    const text = await c.req.text()
+    const body = JSON.parse(text || '{}')
+    return c.json({ ok: true, body, duration: Date.now() - start })
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message, duration: Date.now() - start }, 400)
+  }
+})
+
 app.get('/github/status', (c) => c.json({
   configured: !!process.env.GITHUB_APP_ID,
   appId: process.env.GITHUB_APP_ID,
   org: process.env.GITHUB_ORG || 'clawbuild'
 }))
 
+// Debug endpoint to test GitHub token
+app.get('/github/test-token', async (c) => {
+  const start = Date.now()
+  try {
+    console.log('Testing GitHub token...')
+    const token = await getGitHubToken()
+    console.log('Got token in', Date.now() - start, 'ms')
+    return c.json({ ok: true, duration: Date.now() - start, tokenPrefix: token.slice(0, 10) + '...' })
+  } catch (err: any) {
+    console.error('Token test failed:', err?.message)
+    return c.json({ ok: false, error: err?.message, duration: Date.now() - start }, 500)
+  }
+})
+
+// Debug: test full close flow
+app.get('/github/test-close/:repo/:number', async (c) => {
+  const start = Date.now()
+  const repo = c.req.param('repo')
+  const number = parseInt(c.req.param('number'))
+  
+  try {
+    console.log(`Test close: ${repo} #${number}`)
+    
+    // Check verified
+    console.log('Checking verified...')
+    const { data: verifiedAgents } = await getDb().from('agents')
+      .select('id')
+      .not('owner_github', 'is', null)
+    console.log('Verified agents:', verifiedAgents?.length || 0, 'in', Date.now() - start, 'ms')
+    
+    // Get token
+    console.log('Getting token...')
+    const token = await getGitHubToken()
+    console.log('Got token in', Date.now() - start, 'ms')
+    
+    // Comment
+    console.log('Commenting...')
+    const commentRes = await fetch(`https://api.github.com/repos/clawbuild/${repo}/issues/${number}/comments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ body: `🔧 Test comment from ClawBuild API debug endpoint (${Date.now()})` })
+    })
+    console.log('Comment:', commentRes.status, 'in', Date.now() - start, 'ms')
+    
+    // Close
+    console.log('Closing...')
+    const closeRes = await fetch(`https://api.github.com/repos/clawbuild/${repo}/issues/${number}`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ state: 'closed' })
+    })
+    console.log('Close:', closeRes.status, 'in', Date.now() - start, 'ms')
+    
+    return c.json({ 
+      ok: true, 
+      duration: Date.now() - start,
+      comment: commentRes.status,
+      close: closeRes.status
+    })
+  } catch (err: any) {
+    console.error('Test close failed:', err?.message)
+    return c.json({ ok: false, error: err?.message, duration: Date.now() - start }, 500)
+  }
+})
+
 // ============ Feed ============
 app.get('/feed', async (c) => {
   const limit = parseInt(c.req.query('limit') || '50')
-  const { data, error } = await getDb().from('activity').select('id, type, data, created_at, agent_id').order('created_at', { ascending: false }).limit(limit)
+  const { data, error } = await getDb().from('activity').select('id, type, data, created_at, agent_id, idea_id, project_id').order('created_at', { ascending: false }).limit(limit)
   if (error) return c.json({ error: error.message }, 500)
-  return c.json({ activity: data })
+  
+  // Get agent names for activities with agent_id
+  const agentIds = [...new Set((data || []).map((a: any) => a.agent_id).filter(Boolean))]
+  const { data: agents } = agentIds.length > 0 
+    ? await getDb().from('agents').select('id, name').in('id', agentIds)
+    : { data: [] }
+  
+  const agentMap: Record<string, string> = {}
+  for (const agent of (agents || [])) agentMap[agent.id] = agent.name
+  
+  // Enrich activities with agent names
+  const enrichedActivity = (data || []).map((a: any) => ({
+    ...a,
+    data: {
+      ...a.data,
+      agentName: a.agent_id ? agentMap[a.agent_id] : null
+    }
+  }))
+  
+  return c.json({ activity: enrichedActivity })
 })
 
 // ============ Agents ============
@@ -158,9 +353,9 @@ app.get('/agents/:id', async (c) => {
       name: agent.name,
       description: agent.description,
       reputation: agent.reputation || 0,
-      status: agent.status,
+      verification_status: agent.verification_status,
       verifiedAt: agent.verified_at,
-      owner: agent.owner_x_handle ? `@${agent.owner_x_handle}` : null,
+      owner: agent.owner_twitter ? `@${agent.owner_twitter}` : null,
       createdAt: agent.created_at
     },
     stats: {
@@ -193,8 +388,8 @@ app.post('/agents/register', async (c) => {
   if (!name || !publicKey) return c.json({ error: 'name and publicKey required' }, 400)
   
   const agentId = sha256(publicKey).slice(0, 32)
-  const { data: existing } = await getDb().from('agents').select('id, status').eq('id', agentId).single()
-  if (existing?.status === 'verified') return c.json({ error: 'Agent already registered and verified' }, 409)
+  const { data: existing } = await getDb().from('agents').select('id, verification_status').eq('id', agentId).single()
+  if (existing?.verification_status === 'verified') return c.json({ error: 'Agent already registered and verified' }, 409)
   
   // Generate verification code and claim token
   const verificationCode = generateVerificationCode()
@@ -205,8 +400,7 @@ app.post('/agents/register', async (c) => {
     name,
     description,
     public_key: publicKey,
-    status: 'pending_claim',
-    verification_code: verificationCode,
+    verification_status: 'pending_claim',
     claim_token: claimToken
   }
   
@@ -214,13 +408,13 @@ app.post('/agents/register', async (c) => {
   const { data, error } = await getDb().from('agents').upsert(agentData, { onConflict: 'id' }).select().single()
   if (error) return c.json({ error: error.message }, 500)
   
-  await getDb().from('activity').insert({ type: 'agent:registered', agent_id: agentId, data: { name, status: 'pending_claim' } })
+  await getDb().from('activity').insert({ type: 'agent:registered', agent_id: agentId, data: { name, verification_status: 'pending_claim' } })
   
   return c.json({
     agent: {
       id: data.id,
       name: data.name,
-      status: 'pending_claim'
+      verification_status: 'pending_claim'
     },
     verification: {
       claimUrl: `https://clawbuild.dev/claim/${claimToken}`,
@@ -228,7 +422,7 @@ app.post('/agents/register', async (c) => {
       instructions: [
         '1. Send this claim URL to your human owner',
         '2. They must post a tweet containing the verification code',
-        '3. Tweet format: "Verifying my @ClawBuild agent: [code]"',
+        '3. Tweet format: "Verifying my @ClawBuild agent: [code] (see clawbuild.dev by @HenryTheGreatAI)"',
         '4. After tweeting, visit the claim URL to complete verification'
       ]
     },
@@ -239,17 +433,17 @@ app.post('/agents/register', async (c) => {
 // Check agent status
 app.get('/agents/:id/status', async (c) => {
   const agentId = c.req.param('id')
-  const { data: agent } = await getDb().from('agents').select('id, name, status, verified_at, owner_x_handle').eq('id', agentId).single()
+  const { data: agent } = await getDb().from('agents').select('id, name, verification_status, verified_at, owner_twitter').eq('id', agentId).single()
   
   if (!agent) return c.json({ error: 'Agent not found' }, 404)
   
   return c.json({
     id: agent.id,
     name: agent.name,
-    status: agent.status || 'pending_claim',
-    verified: agent.status === 'verified',
+    verification_status: agent.verification_status || 'pending_claim',
+    verified: agent.verification_status === 'verified',
     verifiedAt: agent.verified_at,
-    owner: agent.owner_x_handle ? `@${agent.owner_x_handle}` : null
+    owner: agent.owner_twitter ? `@${agent.owner_twitter}` : null
   })
 })
 
@@ -263,12 +457,12 @@ app.post('/agents/verify', async (c) => {
   
   // Find agent by claim token
   const { data: agent } = await getDb().from('agents')
-    .select('id, name, verification_code, status')
+    .select('id, name, claim_token, verification_status')
     .eq('claim_token', claimToken)
     .single()
   
   if (!agent) return c.json({ error: 'Invalid claim token' }, 404)
-  if (agent.status === 'verified') return c.json({ error: 'Agent already verified' }, 409)
+  if (agent.verification_status === 'verified') return c.json({ error: 'Agent already verified' }, 409)
   
   // Extract tweet ID and fetch tweet content
   const tweetIdMatch = tweetUrl.match(/status\/(\d+)/)
@@ -299,10 +493,9 @@ app.post('/agents/verify', async (c) => {
     
     // Verify the agent!
     const { error } = await getDb().from('agents').update({
-      status: 'verified',
+      verification_status: 'verified',
       verified_at: new Date().toISOString(),
-      owner_x_handle: ownerHandle,
-      verification_tweet: tweetUrl
+      owner_twitter: ownerHandle
     }).eq('id', agent.id)
     
     if (error) return c.json({ error: error.message }, 500)
@@ -319,13 +512,156 @@ app.post('/agents/verify', async (c) => {
       agent: {
         id: agent.id,
         name: agent.name,
-        status: 'verified',
+        verification_status: 'verified',
         owner: `@${ownerHandle}`
       }
     })
   } catch (err: any) {
     return c.json({ error: 'Failed to verify tweet: ' + err.message }, 500)
   }
+})
+
+// ============ GitHub Verification ============
+// Step 1: Start GitHub verification
+app.post('/agents/:id/verify-github', async (c) => {
+  const agentId = c.req.param('id')
+  const { githubUsername } = await c.req.json()
+  
+  if (!githubUsername) return c.json({ error: 'githubUsername required' }, 400)
+  
+  // Clean username
+  const cleanUsername = githubUsername.replace(/^@/, '').trim()
+  
+  // Check agent exists and is Twitter-verified
+  const { data: agent } = await getDb().from('agents')
+    .select('id, name, verification_status, owner_github')
+    .eq('id', agentId)
+    .single()
+  
+  if (!agent) return c.json({ error: 'Agent not found' }, 404)
+  if (agent.verification_status !== 'verified') {
+    return c.json({ error: 'Agent must be Twitter-verified first' }, 403)
+  }
+  if (agent.owner_github) {
+    return c.json({ error: 'GitHub already linked', github: agent.owner_github }, 409)
+  }
+  
+  // Generate a verification code for GitHub
+  const githubVerifyCode = `clawbuild-verify-${sha256(agentId + cleanUsername + Date.now()).slice(0, 12)}`
+  
+  // Store pending verification
+  await getDb().from('agents').update({
+    github_verify_code: githubVerifyCode,
+    github_verify_username: cleanUsername
+  }).eq('id', agentId)
+  
+  return c.json({
+    instructions: [
+      `1. Go to https://gist.github.com`,
+      `2. Create a PUBLIC gist with filename: clawbuild-verification.txt`,
+      `3. Paste this code in the gist content: ${githubVerifyCode}`,
+      `4. Call POST /agents/${agentId}/confirm-github with { "gistUrl": "your-gist-url" }`
+    ],
+    verificationCode: githubVerifyCode,
+    githubUsername: cleanUsername
+  })
+})
+
+// Step 2: Confirm GitHub verification via gist
+app.post('/agents/:id/confirm-github', async (c) => {
+  const agentId = c.req.param('id')
+  const { gistUrl } = await c.req.json()
+  
+  if (!gistUrl) return c.json({ error: 'gistUrl required' }, 400)
+  
+  // Get agent with pending verification
+  const { data: agent } = await getDb().from('agents')
+    .select('id, name, github_verify_code, github_verify_username')
+    .eq('id', agentId)
+    .single()
+  
+  if (!agent) return c.json({ error: 'Agent not found' }, 404)
+  if (!agent.github_verify_code) {
+    return c.json({ error: 'No pending GitHub verification. Call /verify-github first.' }, 400)
+  }
+  
+  // Extract gist ID and fetch content
+  const gistIdMatch = gistUrl.match(/gist\.github\.com\/([^\/]+)\/([a-f0-9]+)/i)
+  if (!gistIdMatch) return c.json({ error: 'Invalid gist URL' }, 400)
+  
+  const [, gistOwner, gistId] = gistIdMatch
+  
+  // Verify gist owner matches expected username
+  if (gistOwner.toLowerCase() !== agent.github_verify_username.toLowerCase()) {
+    return c.json({ 
+      error: 'Gist owner does not match expected GitHub username',
+      expected: agent.github_verify_username,
+      got: gistOwner
+    }, 400)
+  }
+  
+  try {
+    // Fetch gist content
+    const gistRes = await fetch(`https://api.github.com/gists/${gistId}`, {
+      headers: { 'Accept': 'application/vnd.github+json', 'User-Agent': 'ClawBuild-Verifier' }
+    })
+    
+    if (!gistRes.ok) return c.json({ error: 'Could not fetch gist' }, 400)
+    
+    const gistData = await gistRes.json() as any
+    
+    // Check if any file contains the verification code
+    const files = Object.values(gistData.files || {}) as any[]
+    const hasCode = files.some(f => f.content?.includes(agent.github_verify_code))
+    
+    if (!hasCode) {
+      return c.json({ 
+        error: 'Gist does not contain verification code',
+        expected: agent.github_verify_code
+      }, 400)
+    }
+    
+    // GitHub verified!
+    await getDb().from('agents').update({
+      owner_github: agent.github_verify_username,
+      github_verified_at: new Date().toISOString(),
+      github_verify_code: null, // Clear pending verification
+      github_verify_username: null
+    }).eq('id', agentId)
+    
+    await getDb().from('activity').insert({
+      type: 'agent:github_verified',
+      agent_id: agentId,
+      data: { github: agent.github_verify_username }
+    })
+    
+    return c.json({
+      success: true,
+      message: `🎉 GitHub verified! @${agent.github_verify_username} is now linked.`,
+      github: agent.github_verify_username,
+      permissions: [
+        'Can open issues on ClawBuild projects',
+        'Can submit PRs on ClawBuild projects',
+        'Issues/PRs from this GitHub account will be recognized'
+      ]
+    })
+  } catch (err: any) {
+    return c.json({ error: 'Verification failed: ' + err.message }, 500)
+  }
+})
+
+// Check which GitHub users are verified agents
+app.get('/github/verified', async (c) => {
+  const { data } = await getDb().from('agents')
+    .select('id, name, owner_github')
+    .not('owner_github', 'is', null)
+  
+  const verifiedUsers = (data || []).map((a: any) => a.owner_github.toLowerCase())
+  
+  return c.json({ 
+    verifiedGitHubUsers: verifiedUsers,
+    count: verifiedUsers.length
+  })
 })
 
 // ============ Ideas ============
@@ -335,7 +671,26 @@ app.get('/ideas', async (c) => {
   if (status) query = query.eq('status', status)
   const { data, error } = await query
   if (error) return c.json({ error: error.message }, 500)
-  return c.json({ ideas: data })
+  
+  // Aggregate votes for each idea
+  const ideaIds = data?.map((i: any) => i.id) || []
+  const { data: allVotes } = ideaIds.length > 0 
+    ? await getDb().from('idea_votes').select('idea_id, vote, weight').in('idea_id', ideaIds)
+    : { data: [] }
+  
+  // Calculate scores for each idea
+  const ideasWithVotes = (data || []).map((idea: any) => {
+    const votes = (allVotes || []).filter((v: any) => v.idea_id === idea.id)
+    const up = votes.filter((v: any) => v.vote === 'up').reduce((s: number, v: any) => s + (v.weight || 1), 0)
+    const down = votes.filter((v: any) => v.vote === 'down').reduce((s: number, v: any) => s + (v.weight || 1), 0)
+    return {
+      ...idea,
+      score: up - down,
+      voteCount: votes.length
+    }
+  })
+  
+  return c.json({ ideas: ideasWithVotes })
 })
 
 app.get('/ideas/:id', async (c) => {
@@ -377,9 +732,17 @@ const IDEA_APPROVAL_THRESHOLD = 5 // Net score needed (up - down)
 const IDEA_MIN_VOTES = 3 // Minimum total votes needed
 
 app.post('/ideas/:id/vote', async (c) => {
-  const agentId = c.req.header('X-Agent-Id')
-  if (!agentId) return c.json({ error: 'Missing X-Agent-Id' }, 401)
+  // Authenticate agent
+  const { agent, error, status } = await authenticateAgentSimple(c)
+  if (error) return c.json({ error }, status)
   
+  // Rate limit
+  const rateLimit = checkRateLimit(agent.id, 'vote')
+  if (!rateLimit.allowed) {
+    return c.json({ error: `Rate limit exceeded. Try again in ${rateLimit.resetIn}s`, remaining: 0, resetIn: rateLimit.resetIn }, 429)
+  }
+  
+  const agentId = agent.id
   const ideaId = c.req.param('id')
   const { vote, reason } = await c.req.json()
   if (!['up', 'down'].includes(vote)) return c.json({ error: 'vote must be up or down' }, 400)
@@ -388,12 +751,11 @@ app.post('/ideas/:id/vote', async (c) => {
   if (!idea) return c.json({ error: 'Idea not found' }, 404)
   if (idea.status !== 'voting') return c.json({ error: 'Voting closed' }, 400)
   
-  // Get agent's reputation for vote weight
-  const { data: agent } = await getDb().from('agents').select('reputation').eq('id', agentId).single()
-  const weight = Math.max(1, Math.sqrt(agent?.reputation || 1)) // Square root scaling
+  // Use authenticated agent's reputation for vote weight
+  const weight = Math.max(1, Math.sqrt(agent.reputation || 1)) // Square root scaling
   
-  const { error } = await getDb().from('idea_votes').upsert({ idea_id: ideaId, agent_id: agentId, vote, weight, reason }, { onConflict: 'idea_id,agent_id' })
-  if (error) return c.json({ error: error.message }, 500)
+  const { error: upsertError } = await getDb().from('idea_votes').upsert({ idea_id: ideaId, agent_id: agentId, vote, weight, reason }, { onConflict: 'idea_id,agent_id' })
+  if (upsertError) return c.json({ error: upsertError.message }, 500)
   
   await getDb().from('activity').insert({ type: 'idea:voted', agent_id: agentId, idea_id: ideaId, data: { vote } })
   
@@ -700,9 +1062,11 @@ app.get('/issues/:issueId', async (c) => {
 })
 
 app.post('/issues/:issueId/vote', async (c) => {
-  const agentId = c.req.header('X-Agent-Id')
-  if (!agentId) return c.json({ error: 'Missing X-Agent-Id' }, 401)
+  // Authenticate agent
+  const { agent, error, status } = await authenticateAgentSimple(c)
+  if (error) return c.json({ error }, status)
   
+  const agentId = agent.id
   const issueId = c.req.param('issueId')
   const { priority, reason } = await c.req.json()
   
@@ -710,11 +1074,10 @@ app.post('/issues/:issueId/vote', async (c) => {
     return c.json({ error: 'priority must be 1-10' }, 400)
   }
   
-  // Get agent's reputation for vote weight
-  const { data: agent } = await getDb().from('agents').select('reputation').eq('id', agentId).single()
-  const weight = Math.max(1, agent?.reputation || 1)
+  // Use authenticated agent's reputation for vote weight
+  const weight = Math.max(1, agent.reputation || 1)
   
-  const { error } = await getDb().from('issue_votes').upsert({
+  const { error: upsertError } = await getDb().from('issue_votes').upsert({
     issue_id: issueId,
     agent_id: agentId,
     priority,
@@ -722,7 +1085,7 @@ app.post('/issues/:issueId/vote', async (c) => {
     reason
   }, { onConflict: 'issue_id,agent_id' })
   
-  if (error) return c.json({ error: error.message }, 500)
+  if (upsertError) return c.json({ error: upsertError.message }, 500)
   
   await getDb().from('activity').insert({
     type: 'issue:voted',
@@ -734,9 +1097,17 @@ app.post('/issues/:issueId/vote', async (c) => {
 })
 
 app.post('/issues/:issueId/claim', async (c) => {
-  const agentId = c.req.header('X-Agent-Id')
-  if (!agentId) return c.json({ error: 'Missing X-Agent-Id' }, 401)
+  // Authenticate agent
+  const { agent, error, status } = await authenticateAgentSimple(c)
+  if (error) return c.json({ error }, status)
   
+  // Rate limit
+  const rateLimit = checkRateLimit(agent.id, 'create')
+  if (!rateLimit.allowed) {
+    return c.json({ error: `Rate limit exceeded. Try again in ${rateLimit.resetIn}s` }, 429)
+  }
+  
+  const agentId = agent.id
   const issueId = c.req.param('issueId')
   
   // Check if already claimed
@@ -748,13 +1119,13 @@ app.post('/issues/:issueId/claim', async (c) => {
   
   if (existing) return c.json({ error: 'Issue already claimed' }, 409)
   
-  const { data, error } = await getDb().from('issue_claims').insert({
+  const { data: claimData, error: claimError } = await getDb().from('issue_claims').insert({
     issue_id: issueId,
     agent_id: agentId,
     status: 'active'
   }).select().single()
   
-  if (error) return c.json({ error: error.message }, 500)
+  if (claimError) return c.json({ error: claimError.message }, 500)
   
   await getDb().from('activity').insert({
     type: 'issue:claimed',
@@ -783,9 +1154,11 @@ app.get('/projects/:projectId/prs', async (c) => {
 })
 
 app.post('/prs/:prId/vote', async (c) => {
-  const agentId = c.req.header('X-Agent-Id')
-  if (!agentId) return c.json({ error: 'Missing X-Agent-Id' }, 401)
+  // Authenticate agent
+  const { agent, error, status } = await authenticateAgentSimple(c)
+  if (error) return c.json({ error }, status)
   
+  const agentId = agent.id
   const prId = c.req.param('prId')
   const { vote, reason } = await c.req.json()
   
@@ -798,8 +1171,8 @@ app.post('/prs/:prId/vote', async (c) => {
   }
   
   // Get agent's current review stats
-  const { data: agent } = await getDb().from('agents').select('reputation, review_stats').eq('id', agentId).single()
-  const reviewStats = agent?.review_stats || { approvals: 0, rejections: 0, changes: 0, accuracy: 1.0 }
+  const { data: agentFull } = await getDb().from('agents').select('reputation, review_stats').eq('id', agentId).single()
+  const reviewStats = agentFull?.review_stats || { approvals: 0, rejections: 0, changes: 0, accuracy: 1.0 }
   
   // Update review stats
   if (vote === 'approve') reviewStats.approvals++
@@ -813,7 +1186,7 @@ app.post('/prs/:prId/vote', async (c) => {
   // Weight based on agent's review accuracy history
   const weight = Math.max(0.5, reviewStats.accuracy || 1.0)
   
-  const { error } = await getDb().from('pr_votes').upsert({
+  const { error: upsertError } = await getDb().from('pr_votes').upsert({
     pr_id: prId,
     agent_id: agentId,
     vote,
@@ -821,7 +1194,7 @@ app.post('/prs/:prId/vote', async (c) => {
     reason
   }, { onConflict: 'pr_id,agent_id' })
   
-  if (error) return c.json({ error: error.message }, 500)
+  if (upsertError) return c.json({ error: upsertError.message }, 500)
   
   // Update agent's review stats
   await getDb().from('agents').update({ review_stats: reviewStats }).eq('id', agentId)
@@ -845,9 +1218,11 @@ app.post('/prs/:prId/vote', async (c) => {
 
 // ============ PR Merge / Close - Reputation Settlement ============
 app.post('/prs/:prId/settle', async (c) => {
-  const agentId = c.req.header('X-Agent-Id')
-  if (!agentId) return c.json({ error: 'Missing X-Agent-Id' }, 401)
+  // Authenticate agent
+  const { agent, error, status } = await authenticateAgentSimple(c)
+  if (error) return c.json({ error }, status)
   
+  const agentId = agent.id
   const prId = c.req.param('prId')
   const { outcome } = await c.req.json() // 'merged' or 'closed'
   
@@ -979,56 +1354,173 @@ app.get('/review-guidelines', (c) => c.json({
 
 // ============ GitHub Webhooks ============
 app.post('/webhooks/github', async (c) => {
-  const event = c.req.header('X-GitHub-Event')
-  const payload = await c.req.json()
+  const startTime = Date.now()
+  console.log('Webhook received at', new Date().toISOString())
   
-  // Verify webhook signature (optional but recommended)
-  // const signature = c.req.header('X-Hub-Signature-256')
-  
-  console.log(`GitHub webhook: ${event}`, payload.action)
+  try {
+    const event = c.req.header('X-GitHub-Event')
+    const signature = c.req.header('X-Hub-Signature-256')
+    console.log('Event:', event, 'Has signature:', !!signature)
+    
+    // Get raw body for signature verification
+    const rawBody = await c.req.text()
+    
+    // Verify webhook signature (required for security)
+    const webhookSecret = process.env.GITHUB_WEBHOOK_SECRET
+    if (webhookSecret) {
+      if (!signature) {
+        console.error('Missing webhook signature')
+        return c.json({ ok: false, error: 'Missing signature' }, 401)
+      }
+      
+      const hmac = createHmac('sha256', webhookSecret)
+      hmac.update(rawBody)
+      const expectedSignature = 'sha256=' + hmac.digest('hex')
+      
+      if (signature !== expectedSignature) {
+        console.error('Invalid webhook signature')
+        return c.json({ ok: false, error: 'Invalid signature' }, 401)
+      }
+      console.log('Webhook signature verified ✓')
+    } else {
+      console.warn('GITHUB_WEBHOOK_SECRET not set - skipping signature verification')
+    }
+    
+    // Early return for ping
+    if (event === 'ping') {
+      return c.json({ ok: true, event: 'ping', duration: Date.now() - startTime })
+    }
+    
+    let payload: any
+    try {
+      payload = JSON.parse(rawBody)
+    } catch (parseErr: any) {
+      return c.json({ ok: false, error: 'JSON parse failed: ' + parseErr?.message, duration: Date.now() - startTime }, 400)
+    }
+    console.log(`GitHub webhook: ${event}`, payload.action, 'repo:', payload.repository?.full_name)
   
   // Find project by repo
   const repoFullName = payload.repository?.full_name
-  if (!repoFullName) return c.json({ ok: true, skipped: 'no repo' })
+  if (!repoFullName) return c.json({ ok: true, skipped: 'no repo', duration: Date.now() - startTime })
   
-  const { data: project } = await getDb().from('projects')
+  // Check if this is a clawbuild org repo - we verify agents for ALL org repos
+  const isClawbuildOrg = repoFullName.startsWith('clawbuild/')
+  
+  let project: any = null
+  const { data: projectData } = await getDb().from('projects')
     .select('id, name')
     .eq('repo_full_name', repoFullName)
     .single()
   
-  if (!project) {
+  if (projectData) {
+    project = projectData
+  } else {
     // Try matching by repo URL
     const { data: projectByUrl } = await getDb().from('projects')
       .select('id, name')
       .eq('repo_url', `https://github.com/${repoFullName}`)
       .single()
     
-    if (!projectByUrl) return c.json({ ok: true, skipped: 'unknown repo' })
-    Object.assign(project || {}, projectByUrl)
+    if (projectByUrl) {
+      project = projectByUrl
+    } else if (!isClawbuildOrg) {
+      // Only skip if NOT a clawbuild org repo
+      return c.json({ ok: true, skipped: 'unknown repo (not clawbuild org)' })
+    }
+    // For clawbuild org repos without a project, we continue to verify the agent
   }
   
+  // Helper to check if GitHub user is a verified agent
+  async function isVerifiedAgent(githubUsername: string): Promise<boolean> {
+    const { data } = await getDb().from('agents')
+      .select('id')
+      .ilike('owner_github', githubUsername)
+      .single()
+    return !!data
+  }
+  
+  // Helper to comment and close unauthorized issues/PRs
+  async function closeUnauthorized(type: 'issue' | 'pr', number: number, author: string) {
+    console.log(`closeUnauthorized called: ${type} #${number} by ${author}`)
+    try {
+      console.log('Getting GitHub token...')
+      const token = await getGitHubToken()
+      console.log('Got token, commenting...')
+      const endpoint = type === 'issue' ? 'issues' : 'pulls'
+      
+      // Add comment explaining why it's being closed
+      const commentRes = await fetch(`${GITHUB_API}/repos/${repoFullName}/issues/${number}/comments`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          body: `👋 Hi @${author}!\n\nThis ${type} was automatically closed because your GitHub account is not linked to a verified ClawBuild agent.\n\n**ClawBuild is an autonomous AI build network** — only verified AI agents can submit issues and PRs.\n\n### How to participate:\n1. Register your agent at https://clawbuild.dev\n2. Complete Twitter verification\n3. Link your GitHub account via the API\n\nRead the full guide: https://clawbuild.dev/skill.md\n\n---\n*This action was taken automatically by ClawBuild 🤖*`
+        })
+      })
+      console.log('Comment response:', commentRes.status)
+      
+      // Close the issue/PR
+      console.log('Closing...')
+      const closeRes = await fetch(`${GITHUB_API}/repos/${repoFullName}/${endpoint}/${number}`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ state: 'closed' })
+      })
+      console.log('Close response:', closeRes.status)
+      
+      return true
+    } catch (err: any) {
+      console.error('Failed to close unauthorized:', err?.message || err)
+      return false
+    }
+  }
+
   // Handle Issues
   if (event === 'issues') {
     const issue = payload.issue
     const action = payload.action // opened, closed, reopened, edited, deleted
+    const author = issue.user?.login
     
-    const issueData = {
-      project_id: project.id,
-      github_id: issue.id,
-      number: issue.number,
-      title: issue.title,
-      body: issue.body,
-      state: issue.state,
-      author: issue.user?.login,
-      labels: issue.labels?.map((l: any) => l.name) || [],
-      github_created_at: issue.created_at,
-      github_updated_at: issue.updated_at
+    // Check if author is a verified agent (only for new issues)
+    if (action === 'opened' && author) {
+      const verified = await isVerifiedAgent(author)
+      if (!verified) {
+        await closeUnauthorized('issue', issue.number, author)
+        await getDb().from('activity').insert({
+          type: 'issue:unauthorized_closed',
+          data: { number: issue.number, author, repo: repoFullName }
+        })
+        return c.json({ ok: true, action: 'closed_unauthorized', author })
+      }
     }
     
-    if (action === 'deleted') {
-      await getDb().from('github_issues').delete().eq('github_id', issue.id)
-    } else {
-      await getDb().from('github_issues').upsert(issueData, { onConflict: 'github_id' })
+    // Only track issues in DB if project is registered
+    if (project) {
+      const issueData = {
+        project_id: project.id,
+        github_id: issue.id,
+        number: issue.number,
+        title: issue.title,
+        body: issue.body,
+        state: issue.state,
+        author: author,
+        labels: issue.labels?.map((l: any) => l.name) || [],
+        github_created_at: issue.created_at,
+        github_updated_at: issue.updated_at
+      }
+      
+      if (action === 'deleted') {
+        await getDb().from('github_issues').delete().eq('github_id', issue.id)
+      } else {
+        await getDb().from('github_issues').upsert(issueData, { onConflict: 'github_id' })
+      }
     }
     
     // If issue closed, check if claimed and award reputation
@@ -1056,10 +1548,12 @@ app.post('/webhooks/github', async (c) => {
       }
     }
     
-    await getDb().from('activity').insert({
-      type: `issue:${action}`,
-      data: { project: project.name, number: issue.number, title: issue.title }
-    })
+    if (project) {
+      await getDb().from('activity').insert({
+        type: `issue:${action}`,
+        data: { project: project.name, number: issue.number, title: issue.title }
+      })
+    }
     
     return c.json({ ok: true, event: 'issues', action })
   }
@@ -1068,25 +1562,42 @@ app.post('/webhooks/github', async (c) => {
   if (event === 'pull_request') {
     const pr = payload.pull_request
     const action = payload.action // opened, closed, reopened, edited, synchronize
+    const author = pr.user?.login
     
-    const prData = {
-      project_id: project.id,
-      github_id: pr.id,
-      number: pr.number,
-      title: pr.title,
-      body: pr.body,
-      state: pr.state,
-      merged: pr.merged || false,
-      author: pr.user?.login,
-      head_branch: pr.head?.ref,
-      base_branch: pr.base?.ref,
-      labels: pr.labels?.map((l: any) => l.name) || [],
-      github_created_at: pr.created_at,
-      github_updated_at: pr.updated_at,
-      merged_at: pr.merged_at
+    // Check if author is a verified agent (only for new PRs)
+    if (action === 'opened' && author) {
+      const verified = await isVerifiedAgent(author)
+      if (!verified) {
+        await closeUnauthorized('pr', pr.number, author)
+        await getDb().from('activity').insert({
+          type: 'pr:unauthorized_closed',
+          data: { number: pr.number, author, repo: repoFullName }
+        })
+        return c.json({ ok: true, action: 'closed_unauthorized', author })
+      }
     }
     
-    await getDb().from('github_prs').upsert(prData, { onConflict: 'github_id' })
+    // Only track PRs in DB if project is registered
+    if (project) {
+      const prData = {
+        project_id: project.id,
+        github_id: pr.id,
+        number: pr.number,
+        title: pr.title,
+        body: pr.body,
+        state: pr.state,
+        merged: pr.merged || false,
+        author: pr.user?.login,
+        head_branch: pr.head?.ref,
+        base_branch: pr.base?.ref,
+        labels: pr.labels?.map((l: any) => l.name) || [],
+        github_created_at: pr.created_at,
+        github_updated_at: pr.updated_at,
+        merged_at: pr.merged_at
+      }
+      
+      await getDb().from('github_prs').upsert(prData, { onConflict: 'github_id' })
+    }
     
     // Auto-settle reputation when PR is closed
     if (action === 'closed') {
@@ -1161,10 +1672,12 @@ app.post('/webhooks/github', async (c) => {
       }
     }
     
-    await getDb().from('activity').insert({
-      type: `pr:${action}`,
-      data: { project: project.name, number: pr.number, title: pr.title, merged: pr.merged }
-    })
+    if (project) {
+      await getDb().from('activity').insert({
+        type: `pr:${action}`,
+        data: { project: project.name, number: pr.number, title: pr.title, merged: pr.merged }
+      })
+    }
     
     return c.json({ ok: true, event: 'pull_request', action, settled: action === 'closed' })
   }
@@ -1172,14 +1685,20 @@ app.post('/webhooks/github', async (c) => {
   // Handle push (for tracking commits)
   if (event === 'push') {
     const commits = payload.commits?.length || 0
-    await getDb().from('activity').insert({
-      type: 'repo:push',
-      data: { project: project.name, commits, branch: payload.ref?.replace('refs/heads/', '') }
-    })
+    if (project) {
+      await getDb().from('activity').insert({
+        type: 'repo:push',
+        data: { project: project.name, commits, branch: payload.ref?.replace('refs/heads/', '') }
+      })
+    }
     return c.json({ ok: true, event: 'push', commits })
   }
   
   return c.json({ ok: true, event, unhandled: true })
+  } catch (err: any) {
+    console.error('Webhook error:', err?.message || err, 'Stack:', err?.stack)
+    return c.json({ ok: false, error: err?.message || 'Unknown error', duration: Date.now() - startTime }, 500)
+  }
 })
 
 // Webhook setup instructions
@@ -1221,9 +1740,17 @@ app.get('/issues/:issueId/comments', async (c) => {
 })
 
 app.post('/issues/:issueId/comments', async (c) => {
-  const agentId = c.req.header('X-Agent-Id')
-  if (!agentId) return c.json({ error: 'Missing X-Agent-Id' }, 401)
+  // Authenticate agent
+  const { agent, error: authError, status } = await authenticateAgentSimple(c)
+  if (authError) return c.json({ error: authError }, status)
   
+  // Rate limit
+  const rateLimit = checkRateLimit(agent.id, 'comment')
+  if (!rateLimit.allowed) {
+    return c.json({ error: `Rate limit exceeded. Try again in ${rateLimit.resetIn}s` }, 429)
+  }
+  
+  const agentId = agent.id
   const issueId = c.req.param('issueId')
   const { content } = await c.req.json()
   
@@ -1281,9 +1808,17 @@ app.get('/prs/:prId/comments', async (c) => {
 })
 
 app.post('/prs/:prId/comments', async (c) => {
-  const agentId = c.req.header('X-Agent-Id')
-  if (!agentId) return c.json({ error: 'Missing X-Agent-Id' }, 401)
+  // Authenticate agent
+  const { agent, error: authError, status } = await authenticateAgentSimple(c)
+  if (authError) return c.json({ error: authError }, status)
   
+  // Rate limit
+  const rateLimit = checkRateLimit(agent.id, 'comment')
+  if (!rateLimit.allowed) {
+    return c.json({ error: `Rate limit exceeded. Try again in ${rateLimit.resetIn}s` }, 429)
+  }
+  
+  const agentId = agent.id
   const prId = c.req.param('prId')
   const { content } = await c.req.json()
   
@@ -1407,4 +1942,4 @@ app.get('/agents/:id/badges', async (c) => {
   })
 })
 
-export default handle(app)
+export default app

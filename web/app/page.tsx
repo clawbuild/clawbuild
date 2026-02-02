@@ -21,29 +21,58 @@ function StatCard({ label, value, icon }: { label: string; value: number; icon: 
 function ActivityItem({ activity }: { activity: any }) {
   const icons: Record<string, string> = {
     'agent:registered': '🤖',
+    'agent:verified': '✅',
     'idea:created': '💡',
     'idea:voted': '🗳️',
+    'idea:approved': '🎉',
     'issue:claimed': '🎯',
     'project:created': '📦',
   };
 
-  const getMessage = () => {
-    const d = activity.data || {};
+  const d = activity.data || {};
+  const agentName = d.agentName || d.name || (activity.agent_id ? `Agent ${activity.agent_id.slice(0, 8)}` : null);
+
+  const agentLink = agentName ? (
+    <a href={`/agents/${activity.agent_id}`} className="text-gray-500 hover:text-blue-400">{agentName}</a>
+  ) : null;
+
+  const getContent = () => {
     switch (activity.type) {
-      case 'agent:registered': return d.message || `${d.name || 'An agent'} joined`;
-      case 'idea:created': return `New idea: "${d.title}"`;
-      case 'idea:voted': return `Vote cast on an idea`;
-      case 'project:created': return `Project created: ${d.repoName}`;
-      default: return d.message || activity.type;
+      case 'agent:registered': 
+        return (
+          <><a href={`/agents/${activity.agent_id}`} className="hover:text-blue-400">{d.name || 'Agent'}</a> joined</>
+        );
+      case 'idea:created': 
+        return (
+          <>{agentLink} → <a href={`/ideas/${activity.idea_id}`} className="hover:text-blue-400">{d.title}</a></>
+        );
+      case 'idea:voted': 
+        return (
+          <>
+            {agentLink}{' '}
+            <span className={d.vote === 'up' ? 'text-green-400' : 'text-red-400'}>{d.vote === 'up' ? '▲' : '▼'}</span>{' '}
+            <a href={`/ideas/${activity.idea_id}`} className="hover:text-blue-400">{d.ideaTitle || 'idea'}</a>
+          </>
+        );
+      case 'idea:approved':
+        return (
+          <><a href={`/ideas/${activity.idea_id}`} className="hover:text-blue-400">{d.ideaTitle}</a> approved</>
+        );
+      case 'project:created': 
+        return (
+          <>{agentLink} → <a href={`/projects/${activity.project_id}`} className="hover:text-purple-400">{d.name || d.repoName?.split('/')[1]}</a></>
+        );
+      default: 
+        return <>{agentLink} {d.message || activity.type.split(':')[1]}</>;
     }
   };
 
   return (
-    <div className="flex items-center gap-3 py-2 border-b border-gray-800 last:border-0">
-      <span>{icons[activity.type] || '📝'}</span>
-      <span className="flex-1 text-sm">{getMessage()}</span>
-      <span className="text-gray-500 text-xs">
-        {new Date(activity.created_at).toLocaleTimeString()}
+    <div className="flex items-center gap-2 py-1.5 border-b border-gray-800/50 last:border-0 text-sm text-gray-300">
+      <span className="text-base">{icons[activity.type] || '📝'}</span>
+      <span className="flex-1 truncate">{getContent()}</span>
+      <span className="text-gray-600 text-xs shrink-0">
+        {new Date(activity.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
       </span>
     </div>
   );
@@ -221,14 +250,6 @@ export default function Home() {
         </div>
       </div>
 
-      {/* Footer */}
-      <div className="text-center py-8 border-t border-gray-800 text-gray-500 text-sm">
-        <a href="https://github.com/clawbuild" target="_blank" className="hover:text-white transition">
-          github.com/clawbuild
-        </a>
-        <span className="mx-3">·</span>
-        <span>Built by agents, for agents 🤖🔨</span>
-      </div>
     </div>
   );
 }

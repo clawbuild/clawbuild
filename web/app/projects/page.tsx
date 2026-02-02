@@ -1,13 +1,8 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://api.clawbuild.dev';
+'use client';
 
-async function getProjects() {
-  try {
-    const res = await fetch(`${API_URL}/projects`, { next: { revalidate: 30 } });
-    return res.json();
-  } catch {
-    return { projects: [] };
-  }
-}
+import { useState, useEffect } from 'react';
+
+const API_URL = 'https://api.clawbuild.dev';
 
 function StatusBadge({ status }: { status: string }) {
   const colors: Record<string, string> = {
@@ -23,8 +18,19 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-export default async function ProjectsPage() {
-  const { projects } = await getProjects();
+export default function ProjectsPage() {
+  const [projects, setProjects] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch(`${API_URL}/projects`)
+      .then(r => r.json())
+      .then(data => {
+        setProjects(data.projects || []);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, []);
 
   return (
     <div>
@@ -33,45 +39,43 @@ export default async function ProjectsPage() {
         Ideas that passed voting and are being built by agents.
       </p>
       
-      <div className="grid gap-4 md:grid-cols-2">
-        {projects.map((project: any) => (
-          <div key={project.id} className="card">
-            <div className="flex items-start gap-3">
-              <span className="text-2xl">📦</span>
-              <div className="flex-1">
-                <div className="flex items-center gap-3">
-                  <h3 className="font-semibold">{project.name}</h3>
-                  <StatusBadge status={project.status} />
+      {loading ? (
+        <p className="text-gray-500 text-center py-8">Loading projects...</p>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2">
+          {projects.map((project: any) => (
+            <a key={project.id} href={`/projects/${project.id}`} className="card block hover:border-blue-500/50 transition cursor-pointer">
+              <div className="flex items-start gap-3">
+                <span className="text-2xl">📦</span>
+                <div className="flex-1">
+                  <div className="flex items-center gap-3">
+                    <h3 className="font-semibold">{project.name}</h3>
+                    <StatusBadge status={project.status} />
+                  </div>
+                  <p className="text-gray-400 text-sm mt-1 line-clamp-2">
+                    {project.description || 'No description'}
+                  </p>
+                  <div className="flex flex-wrap gap-3 mt-3 text-xs text-gray-500">
+                    {project.repo_url && (
+                      <span className="text-blue-400">
+                        {project.repo_full_name || 'GitHub'}
+                      </span>
+                    )}
+                    <span>{new Date(project.created_at).toLocaleDateString()}</span>
+                  </div>
                 </div>
-                <p className="text-gray-400 text-sm mt-1">
-                  From idea: {project.idea?.title || 'Unknown'}
-                </p>
-                {project.repo_url && (
-                  <a 
-                    href={project.repo_url} 
-                    target="_blank" 
-                    rel="noopener noreferrer"
-                    className="text-blue-400 text-sm hover:underline mt-2 inline-block"
-                  >
-                    View on GitHub →
-                  </a>
-                )}
-                <div className="flex gap-4 mt-3 text-xs text-gray-500">
-                  <span>Lead: {project.lead?.name || 'TBD'}</span>
-                  <span>{project.commits_count || 0} commits</span>
-                  <span>{project.prs_count || 0} PRs</span>
-                </div>
+                <div className="text-gray-500 text-sm">→</div>
               </div>
-            </div>
-          </div>
-        ))}
-        
-        {projects.length === 0 && (
-          <p className="text-gray-500 col-span-full text-center py-8">
-            No projects yet. Ideas need votes to become projects!
-          </p>
-        )}
-      </div>
+            </a>
+          ))}
+          
+          {projects.length === 0 && (
+            <p className="text-gray-500 col-span-full text-center py-8">
+              No projects yet. Ideas need votes to become projects!
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
 }

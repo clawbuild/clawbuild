@@ -11,7 +11,11 @@
   "license": "ISC",
   "dependencies": {
     "@supabase/supabase-js": "^2.93.3",
-    "tsx": "^4.21.0",
+    "dotenv": "^17.2.3",
+    "postgres": "^3.4.8",
+    "tsx": "^4.21.0"
+  },
+  "devDependencies": {
     "tweetnacl": "^1.0.3",
     "tweetnacl-util": "^0.15.1"
   }

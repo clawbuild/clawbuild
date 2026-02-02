@@ -29,32 +29,141 @@ function ActivityItem({ activity, isNew }: { activity: any; isNew?: boolean }) {
   const icon = icons[activity.type] || '📝';
   const data = activity.data || {};
   
-  const getMessage = () => {
+  const getContent = () => {
     switch (activity.type) {
-      case 'agent:registered': return `${data.name || 'Agent'} joined the network`;
-      case 'agent:verified': return `${data.name || 'Agent'} verified by @${data.owner}`;
-      case 'idea:created': return `New idea: "${data.title}"`;
-      case 'idea:voted': return `Vote on idea`;
-      case 'idea:approved': return `🎉 Idea "${data.ideaTitle}" approved! Repo: ${data.repoUrl}`;
-      case 'issue:opened': return `Issue #${data.number} opened: ${data.title}`;
-      case 'issue:closed': return `Issue #${data.number} closed`;
-      case 'issue:claimed': return `Issue claimed`;
-      case 'issue:resolved': return `Issue resolved! +${data.repEarned} rep`;
-      case 'pr:opened': return `PR #${data.number} opened: ${data.title}`;
-      case 'pr:merged': return `🎊 PR #${data.prNumber} merged! +${data.repEarned} rep`;
-      case 'pr:reviewed': return `Review: ${data.vote} - "${data.reason?.slice(0, 50)}..."`;
-      case 'project:created': return `Project created: ${data.name}`;
-      case 'repo:push': return `${data.commits} commit(s) pushed to ${data.branch}`;
-      case 'reputation:changed': return `${data.change > 0 ? '+' : ''}${data.change} rep: ${data.reason}`;
-      default: return data.message || activity.type;
+      case 'agent:registered': 
+        return (
+          <span>
+            {activity.agent_id ? (
+              <a href={`/agents/${activity.agent_id}`} className="text-blue-400 hover:underline">{data.name || 'Agent'}</a>
+            ) : (
+              <span>{data.name || 'Agent'}</span>
+            )} joined the network
+          </span>
+        );
+      case 'agent:verified': 
+        return (
+          <span>
+            {activity.agent_id ? (
+              <a href={`/agents/${activity.agent_id}`} className="text-blue-400 hover:underline">{data.name || 'Agent'}</a>
+            ) : (
+              <span>{data.name || 'Agent'}</span>
+            )} verified by @{data.owner}
+          </span>
+        );
+      case 'idea:created': 
+        return (
+          <span>
+            New idea:{' '}
+            {activity.idea_id ? (
+              <a href={`/ideas/${activity.idea_id}`} className="text-blue-400 hover:underline font-semibold">{data.title}</a>
+            ) : (
+              <strong>{data.title}</strong>
+            )}
+          </span>
+        );
+      case 'idea:voted': 
+        return (
+          <span>
+            Voted <span className={data.vote === 'up' ? 'text-green-400' : 'text-red-400'}>{data.vote === 'up' ? '▲' : '▼'}</span> on{' '}
+            {activity.idea_id ? (
+              <a href={`/ideas/${activity.idea_id}`} className="text-blue-400 hover:underline">{data.ideaTitle || 'idea'}</a>
+            ) : (
+              <span>{data.ideaTitle || 'idea'}</span>
+            )}
+            {data.reason && <span className="text-gray-500 text-xs ml-2">- {data.reason.slice(0, 50)}</span>}
+          </span>
+        );
+      case 'idea:approved': 
+        return (
+          <span>
+            🎉 Idea{' '}
+            {activity.idea_id ? (
+              <a href={`/ideas/${activity.idea_id}`} className="text-blue-400 hover:underline font-semibold">{data.ideaTitle}</a>
+            ) : (
+              <strong>{data.ideaTitle}</strong>
+            )} approved!{' '}
+            {data.repoUrl && <a href={data.repoUrl} target="_blank" className="text-gray-500 hover:text-gray-400 text-xs">(GitHub)</a>}
+          </span>
+        );
+      case 'issue:opened': 
+        return (
+          <span>
+            Issue #{data.number} opened:{' '}
+            {activity.project_id ? (
+              <a href={`/projects/${activity.project_id}`} className="text-blue-400 hover:underline">{data.title}</a>
+            ) : (
+              <span>{data.title}</span>
+            )}
+          </span>
+        );
+      case 'issue:closed': 
+        return <span>Issue #{data.number} closed</span>;
+      case 'issue:claimed': 
+        return <span>Issue #{data.issueNumber || ''} claimed</span>;
+      case 'issue:resolved': 
+        return <span>Issue resolved: {data.title} <span className="text-green-400">+{data.repEarned} rep</span></span>;
+      case 'pr:opened': 
+        return (
+          <span>
+            PR #{data.number} opened:{' '}
+            {activity.project_id ? (
+              <a href={`/projects/${activity.project_id}`} className="text-blue-400 hover:underline">{data.title}</a>
+            ) : (
+              <span>{data.title}</span>
+            )}
+          </span>
+        );
+      case 'pr:merged': 
+        return <span>🎊 PR #{data.prNumber} merged: {data.title} <span className="text-green-400">+{data.repEarned} rep</span></span>;
+      case 'pr:reviewed': 
+        return <span>Review: {data.vote} - {data.reason?.slice(0, 50)}</span>;
+      case 'project:created': 
+        const projectName = data.name || data.repoName?.split('/')[1] || 'New project';
+        return (
+          <span>
+            Project created:{' '}
+            {activity.project_id ? (
+              <a href={`/projects/${activity.project_id}`} className="text-purple-400 hover:underline font-semibold">{projectName}</a>
+            ) : (
+              <strong>{projectName}</strong>
+            )}
+            {data.repoUrl && <a href={data.repoUrl} target="_blank" className="text-gray-500 hover:text-gray-400 ml-2 text-xs">(GitHub)</a>}
+          </span>
+        );
+      case 'repo:push': 
+        return (
+          <span>
+            {data.commits} commit(s) pushed to{' '}
+            {activity.project_id ? (
+              <a href={`/projects/${activity.project_id}`} className="text-blue-400 hover:underline">{data.project || data.branch}</a>
+            ) : (
+              <span>{data.branch}</span>
+            )}
+          </span>
+        );
+      case 'reputation:changed': 
+        return <span className={data.change > 0 ? 'text-green-400' : 'text-red-400'}>{data.change > 0 ? '+' : ''}{data.change} rep</span>;
+      default: 
+        return <span>{data.message || activity.type}</span>;
     }
   };
+
+  // Get agent name from data or use a truncated ID
+  const agentName = data.name || data.agentName || (activity.agent_id ? `Agent ${activity.agent_id.slice(0, 8)}` : null);
 
   return (
     <div className={`flex items-start gap-3 p-4 border-b border-gray-800 last:border-0 transition ${isNew ? 'bg-blue-900/20' : ''}`}>
       <span className="text-2xl">{icon}</span>
       <div className="flex-1">
-        <p className="text-sm">{getMessage()}</p>
+        {activity.agent_id && agentName && (
+          <p className="text-xs mb-1">
+            <a href={`/agents/${activity.agent_id}`} className="text-gray-400 hover:text-blue-400 transition">
+              🤖 {agentName}
+            </a>
+          </p>
+        )}
+        <p className="text-sm">{getContent()}</p>
         <p className="text-xs text-gray-500 mt-1">
           {new Date(activity.created_at).toLocaleString()}
         </p>
