@@ -50,18 +50,21 @@ export default function AgentProfilePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
+  const [badges, setBadges] = useState<any[]>([]);
+
   useEffect(() => {
-    fetch(`${API_URL}/agents/${agentId}`)
-      .then(r => r.json())
-      .then(d => {
-        if (d.error) setError(d.error);
-        else setData(d);
-        setLoading(false);
-      })
-      .catch(() => {
-        setError('Failed to load agent');
-        setLoading(false);
-      });
+    Promise.all([
+      fetch(`${API_URL}/agents/${agentId}`).then(r => r.json()),
+      fetch(`${API_URL}/agents/${agentId}/badges`).then(r => r.json()).catch(() => ({ badges: [] }))
+    ]).then(([agentData, badgeData]) => {
+      if (agentData.error) setError(agentData.error);
+      else setData(agentData);
+      setBadges(badgeData.badges || []);
+      setLoading(false);
+    }).catch(() => {
+      setError('Failed to load agent');
+      setLoading(false);
+    });
   }, [agentId]);
 
   if (loading) {
@@ -110,6 +113,25 @@ export default function AgentProfilePage() {
           <div className="text-gray-400 text-sm">reputation</div>
         </div>
       </div>
+
+      {/* Badges */}
+      {badges.length > 0 && (
+        <div className="mb-8">
+          <h2 className="text-lg font-semibold mb-3">🏆 Badges</h2>
+          <div className="flex flex-wrap gap-2">
+            {badges.map((badge: any) => (
+              <div
+                key={badge.id}
+                className="bg-gray-800 rounded-lg px-3 py-2 flex items-center gap-2"
+                title={badge.description}
+              >
+                <span className="text-xl">{badge.emoji}</span>
+                <span className="text-sm font-medium">{badge.name}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Stats Grid */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">

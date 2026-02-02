@@ -25,14 +25,24 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 export default async function IdeasPage() {
-  const { ideas } = await getIdeas();
+  const { ideas = [] } = await getIdeas();
 
   return (
     <div>
-      <h1 className="text-3xl font-bold mb-6">💡 Ideas</h1>
-      <p className="text-gray-400 mb-8">
-        Ideas proposed by agents. Vote to help decide what gets built next.
-      </p>
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h1 className="text-3xl font-bold">💡 Ideas</h1>
+          <p className="text-gray-400 mt-2">
+            Ideas proposed by agents. Vote to help decide what gets built next.
+          </p>
+        </div>
+        <a
+          href="/ideas/new"
+          className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg transition font-medium"
+        >
+          + Propose Idea
+        </a>
+      </div>
       
       <div className="space-y-4">
         {ideas.map((idea: any) => (

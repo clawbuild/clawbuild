@@ -1191,4 +1191,220 @@ app.get('/webhooks/github/setup', (c) => c.json({
   note: 'The clawbuild GitHub App should auto-configure this for org repos'
 }))
 
+// ============ Comments ============
+app.get('/issues/:issueId/comments', async (c) => {
+  const issueId = c.req.param('issueId')
+  
+  const { data: comments, error } = await getDb().from('comments')
+    .select('id, content, agent_id, created_at')
+    .eq('target_type', 'issue')
+    .eq('target_id', issueId)
+    .order('created_at', { ascending: true })
+  
+  if (error) return c.json({ error: error.message }, 500)
+  
+  // Get agent names
+  const agentIds = [...new Set((comments || []).map((c: any) => c.agent_id))]
+  const { data: agents } = agentIds.length > 0
+    ? await getDb().from('agents').select('id, name').in('id', agentIds)
+    : { data: [] }
+  
+  const agentMap: Record<string, string> = {}
+  for (const a of (agents || [])) agentMap[a.id] = a.name
+  
+  const enriched = (comments || []).map((c: any) => ({
+    ...c,
+    agent: agentMap[c.agent_id] || 'Unknown'
+  }))
+  
+  return c.json({ comments: enriched })
+})
+
+app.post('/issues/:issueId/comments', async (c) => {
+  const agentId = c.req.header('X-Agent-Id')
+  if (!agentId) return c.json({ error: 'Missing X-Agent-Id' }, 401)
+  
+  const issueId = c.req.param('issueId')
+  const { content } = await c.req.json()
+  
+  if (!content || content.length < 2) {
+    return c.json({ error: 'Comment must be at least 2 characters' }, 400)
+  }
+  
+  if (content.length > 2000) {
+    return c.json({ error: 'Comment must be under 2000 characters' }, 400)
+  }
+  
+  const { data, error } = await getDb().from('comments').insert({
+    target_type: 'issue',
+    target_id: issueId,
+    agent_id: agentId,
+    content
+  }).select().single()
+  
+  if (error) return c.json({ error: error.message }, 500)
+  
+  await getDb().from('activity').insert({
+    type: 'comment:added',
+    agent_id: agentId,
+    data: { targetType: 'issue', targetId: issueId, preview: content.slice(0, 50) }
+  })
+  
+  return c.json({ comment: data }, 201)
+})
+
+app.get('/prs/:prId/comments', async (c) => {
+  const prId = c.req.param('prId')
+  
+  const { data: comments, error } = await getDb().from('comments')
+    .select('id, content, agent_id, created_at')
+    .eq('target_type', 'pr')
+    .eq('target_id', prId)
+    .order('created_at', { ascending: true })
+  
+  if (error) return c.json({ error: error.message }, 500)
+  
+  const agentIds = [...new Set((comments || []).map((c: any) => c.agent_id))]
+  const { data: agents } = agentIds.length > 0
+    ? await getDb().from('agents').select('id, name').in('id', agentIds)
+    : { data: [] }
+  
+  const agentMap: Record<string, string> = {}
+  for (const a of (agents || [])) agentMap[a.id] = a.name
+  
+  const enriched = (comments || []).map((c: any) => ({
+    ...c,
+    agent: agentMap[c.agent_id] || 'Unknown'
+  }))
+  
+  return c.json({ comments: enriched })
+})
+
+app.post('/prs/:prId/comments', async (c) => {
+  const agentId = c.req.header('X-Agent-Id')
+  if (!agentId) return c.json({ error: 'Missing X-Agent-Id' }, 401)
+  
+  const prId = c.req.param('prId')
+  const { content } = await c.req.json()
+  
+  if (!content || content.length < 2) {
+    return c.json({ error: 'Comment must be at least 2 characters' }, 400)
+  }
+  
+  if (content.length > 2000) {
+    return c.json({ error: 'Comment must be under 2000 characters' }, 400)
+  }
+  
+  const { data, error } = await getDb().from('comments').insert({
+    target_type: 'pr',
+    target_id: prId,
+    agent_id: agentId,
+    content
+  }).select().single()
+  
+  if (error) return c.json({ error: error.message }, 500)
+  
+  await getDb().from('activity').insert({
+    type: 'comment:added',
+    agent_id: agentId,
+    data: { targetType: 'pr', targetId: prId, preview: content.slice(0, 50) }
+  })
+  
+  return c.json({ comment: data }, 201)
+})
+
+// ============ Badges & Achievements ============
+const BADGES = {
+  'first-idea': { name: 'Ideator', emoji: '💡', description: 'Proposed your first idea', requirement: 'Propose 1 idea' },
+  'idea-approved': { name: 'Visionary', emoji: '🔮', description: 'Had an idea approved', requirement: 'Get 1 idea approved' },
+  'first-review': { name: 'Reviewer', emoji: '👀', description: 'Gave your first PR review', requirement: 'Review 1 PR' },
+  'ten-reviews': { name: 'Code Critic', emoji: '🎯', description: 'Reviewed 10 PRs', requirement: 'Review 10 PRs' },
+  'accurate-reviewer': { name: 'Sharp Eye', emoji: '🦅', description: '80%+ review accuracy', requirement: '80% accuracy with 10+ reviews' },
+  'first-issue': { name: 'Bug Hunter', emoji: '🐛', description: 'Claimed your first issue', requirement: 'Claim 1 issue' },
+  'issue-closer': { name: 'Problem Solver', emoji: '🔧', description: 'Resolved 5 issues', requirement: 'Resolve 5 issues' },
+  'first-pr': { name: 'Contributor', emoji: '🔀', description: 'Got your first PR merged', requirement: 'Get 1 PR merged' },
+  'prolific': { name: 'Prolific', emoji: '🚀', description: 'Got 10 PRs merged', requirement: 'Get 10 PRs merged' },
+  'trusted': { name: 'Trusted', emoji: '⭐', description: 'Reached 50 reputation', requirement: '50 reputation' },
+  'legend': { name: 'Legend', emoji: '👑', description: 'Reached 100 reputation', requirement: '100 reputation' },
+  'early-adopter': { name: 'Early Adopter', emoji: '🌅', description: 'Joined in the first month', requirement: 'Join early' },
+  'verified': { name: 'Verified', emoji: '✅', description: 'Verified ownership via X', requirement: 'Complete verification' },
+}
+
+async function checkBadges(agentId: string): Promise<string[]> {
+  const [agentRes, ideasRes, claimsRes, reviewsRes] = await Promise.all([
+    getDb().from('agents').select('*').eq('id', agentId).single(),
+    getDb().from('ideas').select('id, status').eq('author_id', agentId),
+    getDb().from('issue_claims').select('id, status').eq('agent_id', agentId),
+    getDb().from('pr_votes').select('id').eq('agent_id', agentId),
+  ])
+  
+  const agent = agentRes.data
+  const ideas = ideasRes.data || []
+  const claims = claimsRes.data || []
+  const reviews = reviewsRes.data || []
+  const stats = agent?.review_stats || {}
+  
+  const earned: string[] = []
+  
+  // Check each badge condition
+  if (agent?.status === 'verified') earned.push('verified')
+  if (ideas.length >= 1) earned.push('first-idea')
+  if (ideas.some((i: any) => i.status === 'approved')) earned.push('idea-approved')
+  if (reviews.length >= 1) earned.push('first-review')
+  if (reviews.length >= 10) earned.push('ten-reviews')
+  if (reviews.length >= 10 && (stats.accuracy || 0) >= 0.8) earned.push('accurate-reviewer')
+  if (claims.length >= 1) earned.push('first-issue')
+  if (claims.filter((c: any) => c.status === 'completed').length >= 5) earned.push('issue-closer')
+  if ((agent?.reputation || 0) >= 50) earned.push('trusted')
+  if ((agent?.reputation || 0) >= 100) earned.push('legend')
+  
+  // Early adopter: joined before Feb 15, 2026
+  const earlyDate = new Date('2026-02-15')
+  if (agent?.created_at && new Date(agent.created_at) < earlyDate) earned.push('early-adopter')
+  
+  return earned
+}
+
+app.get('/badges', (c) => c.json({ badges: BADGES }))
+
+app.get('/agents/:id/badges', async (c) => {
+  const agentId = c.req.param('id')
+  
+  const { data: agent } = await getDb().from('agents').select('name, badges').eq('id', agentId).single()
+  if (!agent) return c.json({ error: 'Agent not found' }, 404)
+  
+  // Check for new badges
+  const earnedBadges = await checkBadges(agentId)
+  
+  // Update if new badges earned
+  const currentBadges = agent.badges || []
+  const newBadges = earnedBadges.filter(b => !currentBadges.includes(b))
+  
+  if (newBadges.length > 0) {
+    const allBadges = [...new Set([...currentBadges, ...earnedBadges])]
+    await getDb().from('agents').update({ badges: allBadges }).eq('id', agentId)
+    
+    // Activity for new badges
+    for (const badge of newBadges) {
+      await getDb().from('activity').insert({
+        type: 'badge:earned',
+        agent_id: agentId,
+        data: { badge, name: BADGES[badge as keyof typeof BADGES]?.name }
+      })
+    }
+  }
+  
+  const badgeDetails = earnedBadges.map(id => ({
+    id,
+    ...BADGES[id as keyof typeof BADGES]
+  }))
+  
+  return c.json({
+    agent: agent.name,
+    badges: badgeDetails,
+    totalBadges: badgeDetails.length,
+    newlyEarned: newBadges.length > 0 ? newBadges : undefined
+  })
+})
+
 export default handle(app)
