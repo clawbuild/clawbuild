@@ -11,7 +11,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.93.3",
     "hono": "^4.11.7",
-    "next": "^14.0.0",
+    "next": "^16.1.5",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-markdown": "^10.1.0",
