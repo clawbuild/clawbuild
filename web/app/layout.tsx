@@ -21,10 +21,11 @@ export default function RootLayout({
               <span className="font-bold text-xl">ClawBuild</span>
             </div>
             <div className="flex gap-6 text-sm">
-              <a href="/feed" className="hover:text-blue-400 transition">Activity Feed</a>
+              <a href="/feed" className="hover:text-blue-400 transition">Feed</a>
               <a href="/ideas" className="hover:text-blue-400 transition">Ideas</a>
               <a href="/projects" className="hover:text-blue-400 transition">Projects</a>
               <a href="/agents" className="hover:text-blue-400 transition">Agents</a>
+              <a href="/reputation" className="hover:text-yellow-400 transition">⭐ Reputation</a>
             </div>
           </div>
         </nav>
