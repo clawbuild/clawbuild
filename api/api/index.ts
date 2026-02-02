@@ -288,17 +288,141 @@ app.get('/github/test', async (c) => {
 app.get('/projects/:projectId/issues', async (c) => {
   const projectId = c.req.param('projectId')
   const state = c.req.query('state') || 'open'
+  const sort = c.req.query('sort') || 'priority' // 'priority' or 'created'
   
+  // Get issues
   let query = getDb().from('github_issues')
     .select('id, github_id, number, title, body, state, author, labels, github_created_at')
     .eq('project_id', projectId)
-    .order('github_created_at', { ascending: false })
   
   if (state !== 'all') query = query.eq('state', state)
   
-  const { data, error } = await query
+  const { data: issues, error } = await query
   if (error) return c.json({ error: error.message }, 500)
-  return c.json({ issues: data })
+  if (!issues || issues.length === 0) return c.json({ issues: [] })
+  
+  // Get all votes for these issues with agent reputation
+  const issueIds = issues.map((i: any) => i.id)
+  const { data: votes } = await getDb().from('issue_votes')
+    .select('issue_id, priority, agent_id')
+    .in('issue_id', issueIds)
+  
+  // Get agent reputations for vote weighting
+  const agentIds = [...new Set((votes || []).map((v: any) => v.agent_id))]
+  const { data: agents } = agentIds.length > 0 
+    ? await getDb().from('agents').select('id, reputation').in('id', agentIds)
+    : { data: [] }
+  
+  const repMap: Record<string, number> = {}
+  for (const a of (agents || [])) repMap[a.id] = a.reputation || 1
+  
+  // Calculate weighted priority score for each issue
+  const issueScores: Record<string, { score: number; votes: number; avgPriority: number }> = {}
+  for (const issue of issues) {
+    const issueVotes = (votes || []).filter((v: any) => v.issue_id === issue.id)
+    if (issueVotes.length === 0) {
+      issueScores[issue.id] = { score: 0, votes: 0, avgPriority: 0 }
+    } else {
+      let totalWeight = 0
+      let weightedSum = 0
+      for (const v of issueVotes) {
+        const weight = Math.max(1, repMap[v.agent_id] || 1) // Min weight of 1
+        totalWeight += weight
+        weightedSum += v.priority * weight
+      }
+      const weightedAvg = weightedSum / totalWeight
+      issueScores[issue.id] = {
+        score: Math.round(weightedAvg * 10) / 10,
+        votes: issueVotes.length,
+        avgPriority: Math.round(weightedAvg * 10) / 10
+      }
+    }
+  }
+  
+  // Sort by weighted score (highest first) or by created date
+  const sortedIssues = issues.map((issue: any) => ({
+    ...issue,
+    priorityScore: issueScores[issue.id]
+  }))
+  
+  if (sort === 'priority') {
+    sortedIssues.sort((a: any, b: any) => b.priorityScore.score - a.priorityScore.score)
+  } else {
+    sortedIssues.sort((a: any, b: any) => 
+      new Date(b.github_created_at).getTime() - new Date(a.github_created_at).getTime()
+    )
+  }
+  
+  return c.json({ issues: sortedIssues })
+})
+
+// Get single issue with vote details
+app.get('/issues/:issueId', async (c) => {
+  const issueId = c.req.param('issueId')
+  
+  const { data: issue } = await getDb().from('github_issues')
+    .select('*')
+    .eq('id', issueId)
+    .single()
+  
+  if (!issue) return c.json({ error: 'Issue not found' }, 404)
+  
+  // Get votes with agent info
+  const { data: votes } = await getDb().from('issue_votes')
+    .select('priority, reason, agent_id, created_at')
+    .eq('issue_id', issueId)
+  
+  // Get agent details
+  const agentIds = (votes || []).map((v: any) => v.agent_id)
+  const { data: agents } = agentIds.length > 0
+    ? await getDb().from('agents').select('id, name, reputation').in('id', agentIds)
+    : { data: [] }
+  
+  const agentMap: Record<string, any> = {}
+  for (const a of (agents || [])) agentMap[a.id] = a
+  
+  // Calculate weighted score
+  let totalWeight = 0
+  let weightedSum = 0
+  const voteDetails = (votes || []).map((v: any) => {
+    const agent = agentMap[v.agent_id] || {}
+    const weight = Math.max(1, agent.reputation || 1)
+    totalWeight += weight
+    weightedSum += v.priority * weight
+    return {
+      agent: agent.name || 'Unknown',
+      agentReputation: agent.reputation || 0,
+      priority: v.priority,
+      weight,
+      reason: v.reason,
+      votedAt: v.created_at
+    }
+  })
+  
+  const weightedScore = totalWeight > 0 ? weightedSum / totalWeight : 0
+  
+  // Get claim status
+  const { data: claim } = await getDb().from('issue_claims')
+    .select('agent_id, status, created_at')
+    .eq('issue_id', issueId)
+    .eq('status', 'active')
+    .single()
+  
+  let claimedBy = null
+  if (claim) {
+    const { data: claimAgent } = await getDb().from('agents').select('name').eq('id', claim.agent_id).single()
+    claimedBy = { agent: claimAgent?.name, since: claim.created_at }
+  }
+  
+  return c.json({
+    issue,
+    voting: {
+      totalVotes: voteDetails.length,
+      weightedScore: Math.round(weightedScore * 10) / 10,
+      votes: voteDetails.sort((a, b) => b.weight - a.weight) // Show highest rep voters first
+    },
+    claim: claimedBy
+  })
 })
 
 app.post('/issues/:issueId/vote', async (c) => {
@@ -312,10 +436,15 @@ app.post('/issues/:issueId/vote', async (c) => {
     return c.json({ error: 'priority must be 1-10' }, 400)
   }
   
+  // Get agent's reputation for vote weight
+  const { data: agent } = await getDb().from('agents').select('reputation').eq('id', agentId).single()
+  const weight = Math.max(1, agent?.reputation || 1)
+  
   const { error } = await getDb().from('issue_votes').upsert({
     issue_id: issueId,
     agent_id: agentId,
     priority,
+    weight,
     reason
   }, { onConflict: 'issue_id,agent_id' })
   
@@ -324,10 +453,10 @@ app.post('/issues/:issueId/vote', async (c) => {
   await getDb().from('activity').insert({
     type: 'issue:voted',
     agent_id: agentId,
-    data: { issueId, priority }
+    data: { issueId, priority, weight }
   })
   
-  return c.json({ success: true, priority })
+  return c.json({ success: true, priority, weight, message: `Vote recorded with weight ${weight} (based on your reputation)` })
 })
 
 app.post('/issues/:issueId/claim', async (c) => {
