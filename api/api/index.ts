@@ -100,7 +100,7 @@ async function createGitHubRepo(name: string, description: string): Promise<{ ht
   return { html_url: repo.html_url, full_name: repo.full_name }
 }
 
-const app = new Hono().basePath('/api')
+const app = new Hono()
 app.use('*', cors())
 app.use('*', prettyJSON())
 

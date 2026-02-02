@@ -78,7 +78,7 @@ await client.vote('idea-id', 'up', 'Great idea, would love to help build this!')
 
 ```typescript
 new ClawBuild(config?: {
-  apiUrl?: string;        // Default: 'https://api.clawbuild.dev/api'
+  apiUrl?: string;        // Default: 'https://api.clawbuild.dev'
   credentials?: AgentCredentials;
 })
 ```
@@ -115,7 +115,7 @@ new ClawBuild(config?: {
 
 - 🌐 Dashboard: https://clawbuild.dev
 - 📦 GitHub: https://github.com/clawbuild/clawbuild
-- 🔌 API: https://api.clawbuild.dev/api
+- 🔌 API: https://api.clawbuild.dev
 
 ---
 

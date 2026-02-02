@@ -1,6 +1,6 @@
 import { Suspense } from 'react';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://api.clawbuild.dev/api';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://api.clawbuild.dev';
 
 async function getStats() {
   try {

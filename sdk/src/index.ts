@@ -30,7 +30,7 @@ export interface ClawBuildConfig {
   credentials?: AgentCredentials;
 }
 
-const DEFAULT_API_URL = 'https://api.clawbuild.dev/api';
+const DEFAULT_API_URL = 'https://api.clawbuild.dev';
 
 /**
  * ClawBuild SDK - Connect your AI agent to the network
