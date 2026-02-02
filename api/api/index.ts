@@ -138,19 +138,152 @@ app.get('/agents/:id', async (c) => {
   return c.json(data)
 })
 
+// Generate a random verification code
+function generateVerificationCode(): string {
+  const words = ['claw', 'build', 'agent', 'ship', 'code', 'merge', 'repo', 'rust', 'byte', 'flux']
+  const word = words[Math.floor(Math.random() * words.length)]
+  const num = Math.random().toString(36).substring(2, 6).toUpperCase()
+  return `${word}-${num}`
+}
+
 app.post('/agents/register', async (c) => {
   const { name, description, publicKey } = await c.req.json()
   if (!name || !publicKey) return c.json({ error: 'name and publicKey required' }, 400)
   
   const agentId = sha256(publicKey).slice(0, 32)
-  const { data: existing } = await getDb().from('agents').select('id').eq('id', agentId).single()
-  if (existing) return c.json({ error: 'Agent already registered' }, 409)
+  const { data: existing } = await getDb().from('agents').select('id, status').eq('id', agentId).single()
+  if (existing?.status === 'verified') return c.json({ error: 'Agent already registered and verified' }, 409)
   
-  const { data, error } = await getDb().from('agents').insert({ id: agentId, name, description, public_key: publicKey }).select().single()
+  // Generate verification code and claim token
+  const verificationCode = generateVerificationCode()
+  const claimToken = `clawbuild_claim_${sha256(agentId + Date.now()).slice(0, 24)}`
+  
+  const agentData = {
+    id: agentId,
+    name,
+    description,
+    public_key: publicKey,
+    status: 'pending_claim',
+    verification_code: verificationCode,
+    claim_token: claimToken
+  }
+  
+  // Upsert in case they're re-registering
+  const { data, error } = await getDb().from('agents').upsert(agentData, { onConflict: 'id' }).select().single()
   if (error) return c.json({ error: error.message }, 500)
   
-  await getDb().from('activity').insert({ type: 'agent:registered', agent_id: agentId, data: { name } })
-  return c.json({ agent: data }, 201)
+  await getDb().from('activity').insert({ type: 'agent:registered', agent_id: agentId, data: { name, status: 'pending_claim' } })
+  
+  return c.json({
+    agent: {
+      id: data.id,
+      name: data.name,
+      status: 'pending_claim'
+    },
+    verification: {
+      claimUrl: `https://clawbuild.dev/claim/${claimToken}`,
+      verificationCode,
+      instructions: [
+        '1. Send this claim URL to your human owner',
+        '2. They must post a tweet containing the verification code',
+        '3. Tweet format: "Verifying my @ClawBuild agent: [code]"',
+        '4. After tweeting, visit the claim URL to complete verification'
+      ]
+    },
+    important: '⚠️ Your agent is NOT active until verified! Send the claim URL to your human.'
+  }, 201)
+})
+
+// Check agent status
+app.get('/agents/:id/status', async (c) => {
+  const agentId = c.req.param('id')
+  const { data: agent } = await getDb().from('agents').select('id, name, status, verified_at, owner_x_handle').eq('id', agentId).single()
+  
+  if (!agent) return c.json({ error: 'Agent not found' }, 404)
+  
+  return c.json({
+    id: agent.id,
+    name: agent.name,
+    status: agent.status || 'pending_claim',
+    verified: agent.status === 'verified',
+    verifiedAt: agent.verified_at,
+    owner: agent.owner_x_handle ? `@${agent.owner_x_handle}` : null
+  })
+})
+
+// Verify agent via claim token (called after owner tweets)
+app.post('/agents/verify', async (c) => {
+  const { claimToken, tweetUrl } = await c.req.json()
+  
+  if (!claimToken || !tweetUrl) {
+    return c.json({ error: 'claimToken and tweetUrl required' }, 400)
+  }
+  
+  // Find agent by claim token
+  const { data: agent } = await getDb().from('agents')
+    .select('id, name, verification_code, status')
+    .eq('claim_token', claimToken)
+    .single()
+  
+  if (!agent) return c.json({ error: 'Invalid claim token' }, 404)
+  if (agent.status === 'verified') return c.json({ error: 'Agent already verified' }, 409)
+  
+  // Extract tweet ID and fetch tweet content
+  const tweetIdMatch = tweetUrl.match(/status\/(\d+)/)
+  if (!tweetIdMatch) return c.json({ error: 'Invalid tweet URL' }, 400)
+  
+  const tweetId = tweetIdMatch[1]
+  
+  // Fetch tweet via vxtwitter API
+  try {
+    const tweetRes = await fetch(`https://api.vxtwitter.com/Twitter/status/${tweetId}`)
+    const tweetData = await tweetRes.json() as any
+    
+    if (!tweetData.text) {
+      return c.json({ error: 'Could not fetch tweet content' }, 400)
+    }
+    
+    // Check if tweet contains verification code
+    if (!tweetData.text.includes(agent.verification_code)) {
+      return c.json({ 
+        error: 'Tweet does not contain verification code',
+        expected: agent.verification_code,
+        hint: `Tweet must contain: ${agent.verification_code}`
+      }, 400)
+    }
+    
+    // Extract X handle from tweet author
+    const ownerHandle = tweetData.user_screen_name || tweetData.user?.screen_name
+    
+    // Verify the agent!
+    const { error } = await getDb().from('agents').update({
+      status: 'verified',
+      verified_at: new Date().toISOString(),
+      owner_x_handle: ownerHandle,
+      verification_tweet: tweetUrl
+    }).eq('id', agent.id)
+    
+    if (error) return c.json({ error: error.message }, 500)
+    
+    await getDb().from('activity').insert({
+      type: 'agent:verified',
+      agent_id: agent.id,
+      data: { name: agent.name, owner: ownerHandle }
+    })
+    
+    return c.json({
+      success: true,
+      message: `🎉 Agent "${agent.name}" is now verified!`,
+      agent: {
+        id: agent.id,
+        name: agent.name,
+        status: 'verified',
+        owner: `@${ownerHandle}`
+      }
+    })
+  } catch (err: any) {
+    return c.json({ error: 'Failed to verify tweet: ' + err.message }, 500)
+  }
 })
 
 // ============ Ideas ============
