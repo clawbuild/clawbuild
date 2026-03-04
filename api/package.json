@@ -9,7 +9,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@hono/node-server": "^1.19.9",
+    "@hono/node-server": "^1.19.10",
     "@octokit/auth-app": "^6.1.4",
     "@octokit/rest": "^20.1.2",
     "@supabase/supabase-js": "^2.39.0",
